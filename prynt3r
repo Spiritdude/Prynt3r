@@ -1,0 +1,645 @@
+#!/usr/bin/env python3
+
+# == Prynt3r, a python-based 3D printing CLI tool, written by Rene K. Mueller <spiritdude@gmail.com>
+#
+# License: GPL
+#
+# Description:
+# 
+#
+# History:
+# 2022/12/17: start
+
+import sys, os, re, subprocess, json, time, datetime, serial, math, random
+import trimesh
+
+APPNAME = "Prynt3r"
+VERSION = "0.0.1"
+
+me = os.path.basename(sys.argv.pop(0))
+
+tmp = [ ]
+
+basedirs = [ "/usr/local/prynter3", os.path.join(os.getenv('HOME'),".config/prynt3r") ]
+ 
+conf = {
+   'verbose': 0,
+   'printer': 'unknown',
+   'device': '/dev/ttyUSB0',
+   'baudrate': 115200,
+   'slicer': 'slic3r',
+   'gcode_viewer': 'yagv',
+   'recenter': 1,
+   'relevel': 1,
+   'placement': 'center',
+   'keep': 0,
+}
+conf_src = { }
+
+slicing = { 
+   'machine_name': "Unknown",
+   'build_width': 200,
+   'build_depth': 200,
+   'build_height': 200,
+   'nozzle': 0.4,
+   'line_width': 0.4,
+   'layer_height': 0.25,
+   'filament': 1.75,
+}
+
+intern_keys = { k: 1 for k in conf } | { 
+   'placement': 1,
+   'quiet': 1,
+   'rotate': 1,
+   'scale': 1,
+   'multiply_part': 1,
+   'scad': 1,
+   'zcad': 1,
+   'jscad': 1,
+}   
+slicer = { }
+
+def preg_match(r,s,m):
+   m.clear()
+   _m = re.search(r,s)
+   if _m:
+      m.append(s)
+      m.extend(_m.groups())
+      return True
+   return False
+
+def usage():
+   print(f"""{APPNAME} {VERSION} Usage: [<opts>] <cmd> <file1> ...
+   options:
+   
+   examples:
+      {me} 
+""")
+   sys.exit(0)
+
+_tmpid = 0
+def tmpfn(ext="tmp"):
+   global _tmpid
+   uid = os.getpid()
+   fn = f"/tmp/prynt3r-{uid}-{_tmpid}.{ext}"
+   _tmpid += 1
+   return fn
+
+def clean_exit():
+   for f in tmp:
+      if os.path.exists(f):
+         os.remove(f)
+   sys.exit(0)
+
+def parse_ini(f):
+   c = { }
+   if type(f)==str:
+      fh = open(f,"r")
+   else:
+      fh = f
+   for l in fh.readlines():
+      l = l.rstrip()
+      if re.search('^\s*#',l):
+         continue
+      m = [ ]
+      if preg_match('^(\S+)\s*=\s*(\S*.*)',l,m):
+         k,v = m[1],m[2]
+         k = re.sub('-','_',k)
+         v = re.sub('"([^"]*)"',lambda m: m.group(1),v)     # -- remove ""
+         c[k] = v
+      elif preg_match('^\s{3,}(\S.*)',l,m):
+         c[k] += "\n" + m[1]
+      elif len(l):
+         lprint(f"WARN: '{f}': strange line to parse: '{l}'",level=0)
+   return c
+
+def mapping(s,c):
+   def peval(s):
+      return ' '
+      
+   for k,v in s.items():
+      if k in c:
+         v = peval(v)
+         s[k] = v
+      if re.search('{',v):
+         v = peval(v)
+         s[k] = v
+         
+def sliceMesh(f,fo):
+   if type(f)==list or type(f)==tuple:
+      for _ in f:
+         if not os.path.exists(_):
+            eprint(f"cannot slice mesh, file <{_}> doesn't exist, ignored")
+         m = re.search('\.(\w+)$',_)
+         ext = m[1]
+         if ext not in slicer[conf['slicer']]['formats'].keys():
+            eprint(f"slicer <{conf['slicer']}> does not support format '{ext}'",exit=1)
+   else:
+      if not os.path.exists(f):
+         eprint(f"cannot slice mesh, file <{f}> doesn't exist, ignored")
+         return 
+      m = re.search('\.(\w+)$',_)
+      ext = m[1]
+      if ext not in slicer[conf['slicer']]['formats'].keys():
+         eprint(f"slicer <{conf['slicer']}> does not support format '{ext}'",exit=1)
+   
+   if conf['slicer'] not in slicer:
+      lprint(f"WARN: {conf['slicer']} not officially supported, by trying anyway",level=0)
+      cmd = [conf['slicer'],'-o',fo]
+
+   if conf['slicer'] in ['cura','cura4','cura5']:
+      cmd = [slicer[conf['slicer']]['exe'],'slice','-o',fo]
+      cmd.extend(['-j',os.path.join("/usr/local/prynt3r/slicer/",conf['slicer'],"fdmprinter.def.json")])
+      cmd.extend(['-s','extruder_nr=0'])
+
+      slicing = parse_ini(os.path.join("/usr/local/prynt3r/slicer/",conf['slicer'],"base.ini"))
+      mapping(slicing,parse_ini(os.path.join("/usr/local/prynt3r/slicer/",conf['slicer'],"map.ini")))
+
+      for k,v in slicing.items():
+         if not k in intern_keys:
+            cmd.extend(['-s',f"{k}={str(v)}"])
+      for k,v in conf.items():
+         if not k in intern_keys:
+            cmd.extend(['-s',f"{k}={str(v)}"])
+      if type(f)==list or type(f)==tuple:
+         for _ in f:
+            cmd.extend(['-l',_])
+      else:
+         cmd.extend(['-l',f])
+      p = execx(cmd)
+   else:
+      cmd = [slicer[conf['slicer']]['exe'],'-o',fo]
+      if conf['slicer'] in [ 'slic3r', 'prusa', 'super' ]:
+         cmd.append('-m')
+      if conf['slicer'] in [ 'prusa', 'super' ]:
+         cmd.append('-g')
+
+      slicing = parse_ini(os.path.join("/usr/local/prynt3r/slicer/",conf['slicer'],"base.ini"))
+      mapping(slicing,parse_ini(os.path.join("/usr/local/prynt3r/slicer/",conf['slicer'],"map.ini")))
+
+      if type(f)==list or type(f)==tuple:
+         cmd.extend(f)
+      else:
+         cmd.append(f)
+      p = execx(cmd)
+   if not os.path.exists(fo):
+      eprint(f"slicer produced no G-code: {p}")
+
+def previewGcode(f):
+   if not os.path.exists(f):
+      eprint(f"cannot preview file <{f}> as it doesn't exist, ignored")
+      return
+   execx([conf['gcode_viewer'],f])
+   
+def serialPut(ser,s):
+   ser.write(s.encode())
+
+def serialGet(ser):
+   r = ''
+   while 1:
+      while 1:
+         _ = ser.read(255)
+         r += _.decode()
+         if len(_)<255:
+            break
+         time.sleep(0.05)
+      if re.search('ok\n',r):
+         return r
+      time.sleep(0.05)
+   
+def connectSerial(d):
+   m = [ ]
+   if preg_match("tcp:([^:]+)?:(\d*)",d,m):
+      host = m[1]
+      n = 0
+      if len(m)>1:
+         n = int(m[2])
+      if 0:
+         import socket
+         sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+         try:
+            sock.connect((host,3380+n))
+            sock.write = sock.send
+            sock.read = sock.recv
+            return sock
+         except Exception as e:
+            eprint(f"failed to connect {host}:{n}",exit=1)
+      else:
+         sdev = os.path.join("/tmp",f"prynt3r-device-{host}-{n}")
+         n += 3380
+         if not os.path.exists(sdev):
+            if os.fork()==0:
+               if os.fork()==0:
+                  lprint(f"launch socat {host}:{n} ({sdev})")
+                  lprint(['socat',f'pty,raw,echo=0,b{conf["baudrate"]},link={sdev}',f'tcp:{host}:{n}'],level=2)
+                  subprocess.run(['socat',f'pty,raw,echo=0,b{conf["baudrate"]},link={sdev}',f'tcp:{host}:{n}'])
+                  lprint("socat exited")
+               os.wait()
+               lprint(f"socat ended")
+               os.remove(sdev)
+               sys.exit(0)
+            time.sleep(0.5)
+         d = sdev
+   
+   if not os.path.exists(d):
+      eprint(f"device {d} doesn't exist, abort",exit=1)
+      
+   ser = serial.Serial(d,timeout=0.01)
+   
+   time.sleep(2)                          # -- allow older 8-bit boards to get ready
+   if 'machine_uuid' in conf:
+      uid = None
+      for ask in ["M115","M122"]:
+         serialPut(ser,ask+"\n")
+         _ = serialGet(ser)
+         if preg_match('UUID\s*:\s*(\S+)',_,m):
+            uid = m[1]
+            break
+         elif preg_match('Board ID\s*:\s*(\S+)',_,m):
+            uid = m[1]
+            break
+         elif preg_match('MAC address\s*(\S+)',_,m):
+            uid = m[1]
+            break
+      if uid:
+         if conf['machine_uuid']==uid:
+            print(f"printer authenticated \"{conf['machine_name']}\" ({conf['printer']})")
+         else:
+            eprint(f"printer not authenticated {uid} (response) != {conf['machine_uuid']} (requested)",exit=1)
+   return ser
+            
+def printGcode(f):
+   if not os.path.exists(conf['device']):
+      eprint(f"cannot open device <{conf['device']}>, abort")
+      return
+   ser = connectSerial(conf['device'])
+   
+   if not ser:
+      eprint(f"cannot open device <{conf['device']}>, abort")
+      return 
+   fh = open(f,"r")
+   if not fh:
+      eprint(f"cannot read file <{f}> doesn't exist, ignored")
+      return 
+   for l in fh.getlines():
+      ser.write(l.encode())
+      r = ''
+      while 1:
+         _ = ser.read(255)
+         r += _.decode()
+         if len(_)<255:
+            break
+         time.sleep(0.05)
+      if re.search('ok\n',r):
+         pass
+   ser.close()   
+
+def convertToMesh(f,fo):
+   m = [ ]
+   if preg_match('\.(scad)$',f,m):
+      execx(['openscad','-o',fo,f])
+   elif preg_match('\.(jscad)$',f,m):
+      execx(['openjscad','-o',fo,f])
+   elif preg_match('\.(zcad)$',f,m):
+      execx(['openzcad','-o',fo,f])
+
+def execx(a,**argv):
+   lprint(f"exec {a}",level=2)
+   p = subprocess.run(a,capture_output=True)
+   if p.returncode:
+      lprint(f"process {a} returned non-zero: {p.returncode}",level=2)
+      for l in p.stdout.decode().split("\n"):
+         if len(l):
+            eprint(l)
+      for l in p.stderr.decode().split("\n"):
+         if len(l):
+            eprint(l)
+      
+   return p.returncode
+   
+   
+def lprint(*args,**argv):
+   if ('level' in argv and argv['level']<=conf['verbose']) or ('level' not in argv and conf['verbose']):
+      if 'level' in argv:
+         del(argv['level'])
+      print(f"{me}: {datetime.datetime.now().isoformat()}:",*args)
+
+def eprint(*args,**argv):
+   print(f"{me}: {datetime.datetime.now().isoformat()}: ERROR:",*args)
+   if 'exit' in argv and argv['exit']:
+      sys.exit(argv['exit'])
+
+def pprint(*args,start=False,end=False,tail=False):
+   if conf['verbose']==0:
+      a = [ ]
+      if not start and not tail:
+         a.append(",")
+      elif start:
+         a.append("-")
+      a.extend(args)
+      print(*a,end=("\n" if end or tail else ""),flush=True)
+   else:
+      lprint(*args)
+
+def mopen(f,m="r"):
+   for b in basedirs:
+      if os.path.exists(os.path.join(b,f)):
+         return open(os.path.join(b,f),m)
+
+def iopen(f):
+   return iter([ os.path.join(b,f) for b in basedirs if os.path.exists(os.path.join(b,f)) ])
+
+# -----------------------------------------------------------------------------------------------------
+
+s2l = { "o": "output", "p": "printer", "v": "verbose", "d": "device", "s": "slicer", "k": "keep" }
+s2a = { "o": 1, "p": 1, "d": 1, "s": 1 }
+preproc = { "scad": "stl", "jscad": "stl", "zcad": "stl" }
+
+fs = [ ]
+i = 0
+while i < len(sys.argv):
+   a = sys.argv[i]
+   m = [ ]
+   if preg_match('^-(\w+)$',a,m):
+      for k in m[1]:
+         if k in s2a:
+            i += 1
+            conf[s2l[k]] = sys.argv[i]
+         elif k in s2l:
+            conf[s2l[k]] += 1
+         conf_src[s2l[k]] = 'cli'
+   elif preg_match('^--([\w\.\-]+)$',a,m):
+      k = m[1]
+      k = re.sub('-','_',k)
+      conf[k] = 1
+      conf_src[k] = 'cli'
+   elif preg_match('^--([\w\.\-]+)=(.*)$',a,m):
+      k,v = m[1],m[2]
+      k = re.sub('-','_',k)
+      conf[k] = v
+      conf_src[k] = 'cli'
+   elif preg_match('^@([\w\.\-]+)$',a,m):
+      pass
+   else:
+      fs.append(a)
+   i += 1
+
+cmd = ''
+
+print(f"== {APPNAME} {VERSION} == https://github.com/Spiritdude/Prynt3r")
+
+if len(fs):
+   cmd = fs.pop(0)
+else:
+   if len(fs) and os.path.exists(fs[0]):
+      print("WARN: no command given, 'print' assumed")
+      cmd = 'print'
+
+fh = mopen(os.path.join("slicer","slicers.json"),"r")
+if fh:
+   slicer = json.load(fh)
+   fh.close()
+else:
+   eprint(f"no <{os.path.join('slicer','slicers.json')}> found anywhere: {basedirs}")
+
+for f in iopen(os.path.join("printer","base.ini")):
+   for k,v in parse_ini(f).items():
+      conf[k] = v
+
+if 'printer' in conf:
+   found = 0
+   for f in iopen(os.path.join("printer",f"{conf['printer']}.ini")):
+      for k,v in parse_ini(f).items():
+         if k in conf_src and conf_src[k] == 'cli':
+            continue
+         conf[k] = v
+      found += 1
+   if found==0:
+      lprint(f"WARN: no printer config/profile found anywhere for <{conf['printer']}>",level=0)
+      
+for k in conf:                         # -- transfer conf into slicing
+   if k not in intern_keys:
+      slicing[k] = conf[k]
+
+if conf['verbose']:
+   lprint("conf:",json.dumps(conf,indent=3))
+   lprint("slicing:",json.dumps(slicing,indent=3))
+print(f"printer: \"{slicing['machine_name']}\" ({conf['printer']}), device: {conf['device']}, layer/h: {slicing['layer_height']}, nozzle line/w: {slicing['line_width']}")
+
+if cmd=='slice' or cmd=='preview' or cmd=='print':
+   fsm = [ ]    # -- meshs
+   fsg = [ ]    # -- gcode
+
+   for f in fs:
+      pprint(f"processing <{f}>",start=True)
+
+      inline = [ e for e in conf if e in preproc ]
+
+      m = [ ]
+      if len(inline):
+         ext = inline[0]
+         pprint(f"converting {ext}: {f}")
+
+         src = f
+
+         f = tmpfn(ext)
+
+         fh = open(f,"w")
+         if ext=='scad' and not re.search(';\s*$',src):
+            src += ";"
+         print(src,file=fh)
+         fh.close()
+
+         tmp.append(f)
+
+         fm = tmpfn(preproc[ext])
+         convertToMesh(f,fm)
+         tmp.append(fm)
+         f = fm
+
+      if preg_match('\.gcode$',f,m):
+         fsg.append(f)
+
+      elif preg_match('\.(\w+)',f,m):
+         ext = m[1]
+
+         if ext in preproc:
+            fm = re.sub('\.(\w+)$',preproc[ext],f)
+            convertToMesh(f,fm)
+            tmp.append(fm)
+            f = fm
+            ext = preproc[ext]
+
+         if conf['recenter'] or conf['relevel'] or 'rotate' in conf or 'scale' in conf or 'placement' in conf:
+            pprint(f"prepare")
+
+            m = trimesh.load(f)
+            mm = m.bounds
+            sz = [ mm[1][i]-mm[0][i] for i in range(3) ]
+   
+            # -- recenter X,Y and level Z 
+            if ('recenter' in conf and conf['recenter']) or ('relevel' in conf and conf['relevel']):
+               tr = [(mm[0][j]-mm[1][j])/2 for j in range(3)]
+               pprint(f"translate <{tr}>")
+               m.apply_translation(tr)
+   
+            if 'rotate' in conf:
+               if re.search(',',conf['rotate']):
+                  rt = [ float(f)/180*math.pi for f in conf['rotate'].split(',') ]
+               else:
+                  eprint(f"bad rotation <{conf['rotate']}>, should be <xr>,<yr>,<zr> like 90,0,0")
+               pprint(f"rotate <{[a/math.pi*180 for a in rt]}>")
+               if rt[0]:
+                  m.apply_transform(trimesh.transformations.rotation_matrix(rt[0],[1,0,0]))
+               if rt[1]:
+                  m.apply_transform(trimesh.transformations.rotation_matrix(rt[1],[0,1,0]))
+               if rt[2]:
+                  m.apply_transform(trimesh.transformations.rotation_matrix(rt[2],[0,0,1]))
+
+            if 'scale' in conf:
+               if re.search(',',conf['scale']):
+                  sc = [ ]
+                  abs = False
+                  for i,f in enumerate(conf['scale'].split(',')):
+                     if re.search('mm$',f):
+                        f = float(re.sub('mm$','',f))
+                        fa = f / (mm[1][i]-mm[0][i])
+                        abs = True
+                     else:
+                        f = float(f)
+                     sc.append(f)
+                  if abs:
+                     sc = [ fa for i in range(3) ]
+               else:
+                  sc = [float(conf['scale']) for i in range(3) ]
+               pprint(f"scale <{sc}>")
+               m.apply_scale(sc)
+
+            if 'relevel' in conf and conf['relevel']:
+               mm = m.bounds
+               pprint(f"relevel",-mm[0][2])
+               m.apply_translation([0,0,-mm[0][2]])
+
+            if 'placement' in conf:
+               if conf['placement']=='center':
+                  m.apply_translation([slicing['build_width']/2,slicing['build_depth']/2,0])
+               elif conf['placement']=='random':
+                  xoff = random.random()*.8*(slicing['build_width']/2-(mm[0][0]-mm[1][0])/2)
+                  yoff = random.random()*.8*(slicing['build_depth']/2-(mm[0][1]-mm[1][1])/2)
+                  m.apply_translation([slicing['build_width']/2+xoff,slicing['build_depth']/2+yoff,0])
+
+            for fmt in slicer[conf['slicer']]['formats'].keys():     # -- prefered format
+               fm = tmpfn(fmt)
+               break
+            tmp.append(fm)
+
+            lprint(f"export to <{fm}>")
+            m.export(fm)      # -- we need to save the changed mesh again
+            f = fm
+            fsm.append(f)
+      else:
+         lprint(f"WARN: strange filename <{f}>, cannot determine what to do, skipped",level=0)
+      pprint("",tail=True)
+      
+   # -- at this point, we have all the meshes, ready to slice
+   if 'multiply_part' in conf:
+      n = int(conf['multiply_part'])
+      pprint(f"multiply part {n}x")
+      fsm = [ m for i in range(n) for m in fsm ]
+
+   if len(fsm)>1: # and 'multi_file' in slicer[conf['slicer']] and not slicer[conf['slicer']]['multi_file']:      
+      # -- merge multiple repositioned meshes into one
+      pprint(f"merge {len(fsm)} part(s)",start=True)
+      xp,yp = 0,0
+      ys = 0
+      wn = int(math.sqrt(len(fsm)))
+      if 'cols' in conf:
+         wn = int(conf['cols'])
+      ms = [ ]
+      n = 0
+      for f in fsm:
+         m = trimesh.load(f)
+         mm = m.bounds
+         sz = [ mm[1][i]-mm[0][i] for i in range(3) ]
+         if 'cols' in conf:
+            if n>0 and n%wn == 0:
+               xp = 0
+               yp += ys + 5
+         elif xp+sz[0] > slicing['build_width']*.9:
+            xp = 0
+            yp += ys+5
+         lprint(f"repos #{n} {[xp,yp]}")
+         m.apply_translation([-mm[0][0]+xp,-mm[0][1]+yp,0])
+         ys = max(sz[1],ys)
+         xp += sz[0]+5
+         n += 1
+         ms.append(m)
+      m = trimesh.util.concatenate(ms)
+      fmt = list(slicer[conf['slicer']]['formats'].keys())[0]
+      f = tmpfn(fmt)
+      m.export(f)
+      #m.export("test.stl")
+      tmp.append(f)
+      fsm = [ f ]
+   
+   if len(fsm):                  # -- any mesh to process?
+      pprint(f"slicing part(s) with {conf['slicer']}",start=True)
+      if 'output' in conf:
+         fo = conf['output']
+         if os.path.exists(fo):
+            os.remove(fo)
+         pprint(f"output to <{fo}>")
+      else:
+         fo = tmpfn('gcode')
+         tmp.append(fo)
+      sliceMesh(fsm,fo)
+      fsg.append(fo)
+
+   pprint("",tail=True)
+   
+   # -- at this point, we have the gcode file(s)
+   for f in fsg:
+      if cmd == 'preview':
+         previewGcode(f)
+      if cmd == 'print':
+         printGcode(f)
+      
+elif cmd == 'gconsole':
+   ser = connectSerial(conf['device'])
+   print(f"Hint: use CTRL-C or type 'quit' or 'exit' to quit the session")
+   while 1:
+      print("> ",end="",flush=True)
+      l = sys.stdin.readline()
+      if re.search('(quit|exit)',l):
+         break
+      ser.write(l.encode())
+      while 1:
+         s = ""
+         while 1:
+            _ = ser.read(255)
+            s += _.decode()
+            if len(_)<255:
+               break
+         if len(s):
+            print(f"% {s}")   
+         if re.search('ok\n',s):
+            break
+         time.sleep(0.01)
+         
+elif cmd == 'log':
+   for f in fs:
+      pass
+else:
+   usage()
+
+clean_exit()
+   
+if 'version' in conf:
+   print(f"{APPNAME} {VERSION}")
+   sys.exit(0)
+
+if len(fs)==0:
+   usage()
+
+
+   
