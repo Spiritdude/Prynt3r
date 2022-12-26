@@ -5,13 +5,16 @@
 # License: GPL
 #
 # Description:
-# 
+#  This is a rewrite of Print3r (perl) in Python, hence the Prynt3r as name.
+#  It provides a slicer agnostic CLI to slice, preview, print local and remote.
 #
 # History:
+# 2022/12/19: 0.0.1: cli args parsed, early .ini parsing without conditional variables, local and remote printer access works
 # 2022/12/17: start
 
 import sys, os, re, subprocess, json, time, datetime, serial, math, random
 import trimesh
+import perl5
 
 APPNAME = "Prynt3r"
 VERSION = "0.0.1"
@@ -20,7 +23,7 @@ me = os.path.basename(sys.argv.pop(0))
 
 tmp = [ ]
 
-basedirs = [ "/usr/local/prynter3", os.path.join(os.getenv('HOME'),".config/prynt3r") ]
+basedirs = [ "/usr/share/prynt3r", os.path.join(os.getenv('HOME'),".config/prynt3r") ]
  
 conf = {
    'verbose': 0,
@@ -33,29 +36,23 @@ conf = {
    'relevel': 1,
    'placement': 'center',
    'keep': 0,
+   'quiet': 0
 }
 conf_src = { }
 
 slicing = { 
    'machine_name': "Unknown",
-   'build_width': 200,
-   'build_depth': 200,
-   'build_height': 200,
-   'nozzle': 0.4,
+   'machine_width': 200,
+   'machine_depth': 200,
+   'machine_height': 200,
+   'nozzle_diameter': 0.4,
    'line_width': 0.4,
    'layer_height': 0.25,
    'filament': 1.75,
 }
 
 intern_keys = { k: 1 for k in conf } | { 
-   'placement': 1,
-   'quiet': 1,
-   'rotate': 1,
-   'scale': 1,
-   'multiply_part': 1,
-   'scad': 1,
-   'zcad': 1,
-   'jscad': 1,
+   k: 1 for k in 'placement rotate scale multiply_part scad zcad jscad'.split(' ') 
 }   
 slicer = { }
 
@@ -71,9 +68,42 @@ def preg_match(r,s,m):
 def usage():
    print(f"""{APPNAME} {VERSION} Usage: [<opts>] <cmd> <file1> ...
    options:
-   
+      --device=<dev>       set device (default: {conf['device']})
+        -d <dev>
+      --printer=<name>     set printer name (default: {conf['printer']})
+        -p <name>
+      --slicer=<slicer>    set slicer: {", ".join(slicer.keys())}, (default: {conf['slicer']})
+        -s <slicer>
+      
+      --quiet
+      
+      --placement=<loc>    set location: 'none', 'center', 'random' (default: none)
+      
+      --rotate=<x>,<y>,<z>  rotate model(s)
+      --scale=<f>          scale model(s) uniformly
+      --scale=<x>,<y>,<z>  scale model(s), if value has 'mm' appended, then axis is set absolute
+                              e.g. "0,0,20mm" scales model(s) to 20mm Z height
+      --multiply-part=<n>  multiply model(s)
+      --recenter
+      --relevel
+      --scad               treat arguments as OpenSCAD code, e.g. --scad 'cube(20)'
+      --zcad               treat arguments as OpenZCAD code
+      --jscad              treat arguments as OpenJSCAD code
+      
+   commands:
+      slice <file1> ...
+      print <file1> ...
+      preview <file1> ...
+      gconsole
+      
    examples:
-      {me} 
+      {me} print cube.stl
+      {me} print --scad 'cube(20)'
+      {me} slice cube.stl
+      {me} slice cube.stl -o a.gcode 
+      {me} preview cube.stl 
+      {me} gconsole
+      > M115
 """)
    sys.exit(0)
 
@@ -85,15 +115,16 @@ def tmpfn(ext="tmp"):
    _tmpid += 1
    return fn
 
-def clean_exit():
+def clean_exit(exit=0):
    for f in tmp:
       if os.path.exists(f):
          os.remove(f)
-   sys.exit(0)
+   sys.exit(exit)
 
 def parse_ini(f):
    c = { }
    if type(f)==str:
+      lprint(f"process {f}")
       fh = open(f,"r")
    else:
       fh = f
@@ -102,10 +133,10 @@ def parse_ini(f):
       if re.search('^\s*#',l):
          continue
       m = [ ]
-      if preg_match('^(\S+)\s*=\s*(\S*.*)',l,m):
+      if preg_match('^([\w\-]+)\s*=\s*(\S*.*)',l,m):
          k,v = m[1],m[2]
          k = re.sub('-','_',k)
-         v = re.sub('"([^"]*)"',lambda m: m.group(1),v)     # -- remove ""
+         v = re.sub('^\s*"([^"]*)"\s*$',lambda m: m.group(1),v)     # -- remove "" if entire line
          c[k] = v
       elif preg_match('^\s{3,}(\S.*)',l,m):
          c[k] += "\n" + m[1]
@@ -113,19 +144,59 @@ def parse_ini(f):
          lprint(f"WARN: '{f}': strange line to parse: '{l}'",level=0)
    return c
 
-def mapping(s,c):
+def remap(s,c):
+   vm = perl5.VM()
+
    def peval(s):
-      return ' '
+      lprint(f"   perl-eval: '{s}'",level=3)
+      v = ''
+      try:
+         v = vm.eval(s)
+      except Exception as e:
+         eprint(f"evaluation of '{s}' caused error: '{e}'")
+      if hasattr(v,'decode'): 
+         v = v.decode()
+      v = str(v)
+      lprint(f"   == '{v}'",level=3)
+      return v
+
+   def expr_repl(a):
+      a = a.groups()
+      s = a[0]
+      lprint(f"expr-repl: '{s}'",level=3)
+      return peval(s)
+
+   def var_repl(a):
+      a = a.groups()
+      k = a[0]
+      lprint(f"var-repl: {k}",level=3)
+      if k in conf:
+         return conf[k]
+      elif k in c:
+         return c[k]
+      else:
+         lprint(f"WARN: variable <{k}> referenced but not defined",level=0)
+      return str(0)
       
+   lprint(f"mapping: {c}",level=3)
+   
+   m = [ ]
    for k,v in s.items():
+      lprint(f"mapping {k}: '{v}'",level=3)
       if k in c:
-         v = peval(v)
-         s[k] = v
-      if re.search('{',v):
-         v = peval(v)
-         s[k] = v
+         v = c[k]
+         lprint(f"  => '{v}'",level=3)
+      if type(v)!=str:
+         v = str(v)
+      v = re.sub('\$(\w+)',var_repl,v)                # -- replace all vars
+      v = re.sub('\{([^\}]*)\}',expr_repl,v)          # -- eval entire expression
+      v = re.sub('\\\\n','\n',v)
+      lprint(f"=> {k}: '{v}'",level=3)
+      s[k] = v
          
-def sliceMesh(f,fo):
+def sliceMesh(f,fo,ms):
+   global slicing
+   
    if type(f)==list or type(f)==tuple:
       for _ in f:
          if not os.path.exists(_):
@@ -147,13 +218,15 @@ def sliceMesh(f,fo):
       lprint(f"WARN: {conf['slicer']} not officially supported, by trying anyway",level=0)
       cmd = [conf['slicer'],'-o',fo]
 
-   if conf['slicer'] in ['cura','cura4','cura5']:
+   if conf['slicer'] in ['cura','cura4','cura5']:                 # -- covering all curas
       cmd = [slicer[conf['slicer']]['exe'],'slice','-o',fo]
-      cmd.extend(['-j',os.path.join("/usr/local/prynt3r/slicer/",conf['slicer'],"fdmprinter.def.json")])
+      cmd.extend(['-j',os.path.join("/usr/share/prynt3r/slicer/",conf['slicer'],"fdmprinter.def.json")])
       cmd.extend(['-s','extruder_nr=0'])
 
-      slicing = parse_ini(os.path.join("/usr/local/prynt3r/slicer/",conf['slicer'],"base.ini"))
-      mapping(slicing,parse_ini(os.path.join("/usr/local/prynt3r/slicer/",conf['slicer'],"map.ini")))
+      for k,v in parse_ini(os.path.join("/usr/share/prynt3r/slicer/",conf['slicer'],"base.ini")).items():
+         if k not in slicing:
+            slicing[k] = v
+      remap(slicing,parse_ini(os.path.join("/usr/share/prynt3r/slicer/",conf['slicer'],"map.ini")))
 
       for k,v in slicing.items():
          if not k in intern_keys:
@@ -167,22 +240,55 @@ def sliceMesh(f,fo):
       else:
          cmd.extend(['-l',f])
       p = execx(cmd)
-   else:
+
+   else:                                                          # -- all others
       cmd = [slicer[conf['slicer']]['exe'],'-o',fo]
       if conf['slicer'] in [ 'slic3r', 'prusa', 'super' ]:
          cmd.append('-m')
+         cmd.append('--before-layer-gcode=;LAYER:[layer_num]')    # -- make it cura-like gcode
       if conf['slicer'] in [ 'prusa', 'super' ]:
          cmd.append('-g')
 
-      slicing = parse_ini(os.path.join("/usr/local/prynt3r/slicer/",conf['slicer'],"base.ini"))
-      mapping(slicing,parse_ini(os.path.join("/usr/local/prynt3r/slicer/",conf['slicer'],"map.ini")))
+      if 'placement' in conf:
+         mm = ms.bounds
+         sz = mm[1]-mm[0]
+         if conf['placement']!='none':
+            pos = [slicing['build_width']/2,slicing['build_depth']/2,0]
+            if conf['placement']=='random':
+               pos[0] += (random.random()-1/2)*(conf['build_width']-sz[0]-5)
+               pos[1] += (random.random()-1/2)*(conf['build_depth']-sz[1]-5)
+            if conf['slicer']=='kirimoto':
+               cmd.extend([f"--bedOrigin={pos[0]},{pos[1]}","--outputOriginCenter=true"])
+            elif conf['slicer']=='goslice':
+               cmd.extend([f"--center={pos[0]*1000},{pos[1]*1000}"])
+            else:
+               cmd.extend([f"--bed_center={pos[0]},{pos[1]}"])
+         # m.apply_translation([slicing['build_width']/2,slicing['build_depth']/2,0])
 
+      slicing = parse_ini(os.path.join("/usr/share/prynt3r/slicer/",conf['slicer'],"base.ini"))
+      remap(slicing,parse_ini(os.path.join("/usr/share/prynt3r/slicer/",conf['slicer'],"map.ini")))
+
+      if conf['slicer'] in [ 'slic3r', 'prusa', 'super' ]:        # -- we store setting in --load file.ini (some settings are only available in .ini but not on CLI)
+         fi = tmpfn("ini")
+         tmp.append(fi)
+         fh = open(fi,"w")
+         for k,v in slicing.items():
+            v = re.sub('\n','\\\\n',v)
+            print(f"{k} = {v}",file=fh)
+         fh.close()
+         cmd.extend(['--load',fi]) 
+
+      else:
+         for k,v in slicing.items():
+            cmd.extend(['--'+k,v])
+      
       if type(f)==list or type(f)==tuple:
          cmd.extend(f)
       else:
          cmd.append(f)
       p = execx(cmd)
-   if not os.path.exists(fo):
+      
+   if not os.path.exists(fo) or os.path.getsize(fo)==0:
       eprint(f"slicer produced no G-code: {p}")
 
 def previewGcode(f):
@@ -191,10 +297,10 @@ def previewGcode(f):
       return
    execx([conf['gcode_viewer'],f])
    
-def serialPut(ser,s):
+def writeSerial(ser,s):
    ser.write(s.encode())
 
-def serialGet(ser):
+def readSerial(ser):
    r = ''
    while 1:
       while 1:
@@ -250,8 +356,8 @@ def connectSerial(d):
    if 'machine_uuid' in conf:
       uid = None
       for ask in ["M115","M122"]:
-         serialPut(ser,ask+"\n")
-         _ = serialGet(ser)
+         writeSerial(ser,ask+"\n")
+         _ = readSerial(ser)
          if preg_match('UUID\s*:\s*(\S+)',_,m):
             uid = m[1]
             break
@@ -263,12 +369,60 @@ def connectSerial(d):
             break
       if uid:
          if conf['machine_uuid']==uid:
-            print(f"printer authenticated \"{conf['machine_name']}\" ({conf['printer']})")
+            iprint(f"printer authenticated \"{conf['machine_name']}\" ({conf['printer']})")
          else:
             eprint(f"printer not authenticated {uid} (response) != {conf['machine_uuid']} (requested)",exit=1)
    return ser
             
 def printGcode(f):
+   st = time.time()
+
+   cur_z = 0               # -- current Z
+   lyn = 0                 # -- layer number
+
+   em = 'abs'
+   eabs = 0
+   le = 0
+   
+   def ftime(d):
+      if d<2*60:
+         return f"{int(d/60)}m {int(d)%60:02d}s"
+      return f"{int(d/60/60)}h {int(d/60)%60:02d}m"
+         
+   def parse(l):
+      m = [ ]
+      nonlocal lyn, cur_z, le, em, eabs
+      if preg_match('^;\s*LAYER:\s*(\d+)',l,m):
+         lyn = graceful(int,m[1],on_error=0)
+      if preg_match('Z([\d\.]+)',l,m):
+         cur_z = graceful(float,m[1],on_error=0)
+      if preg_match('^G92\s.*E([\d\.]+)',l,m):
+         le = graceful(float,m[1],on_error=0)
+      elif preg_match('^G[0123]\s.*E([\d\.]+)',l,m):
+         e = graceful(float,m[1],on_error=0)
+         if em == 'abs':
+            eabs += e-le
+         else:
+            eabs += e
+         le = e
+      elif preg_match('^M82\s',l,m):   # -- E abs
+         em = 'abs'
+      elif preg_match('^M83\s',l,m):   # -- E rel
+         em = 'rel'
+      elif preg_match('^G90\s',l,m):   # -- abs pos (also E)
+         em = 'abs'
+      elif preg_match('^G91\s',l,m):   # -- rel pos (also E)
+         em = 'rel'
+      
+   def update():
+      # print3r: print: 0h 55m elapsed, eta 0h 00m, 100.0% complete, z=39.85mm, layer #89, filament 8.44m
+      fcur = fh.tell()
+      tot = (time.time()-st) / (fcur/flen+.001) 
+      eta = 0
+      if st+tot > time.time():
+         eta = max((st + tot) - time.time(),0)     # -- don't go below 0
+      print(f"{me}: print: {ftime(time.time()-st)} elapsed, eta {ftime(eta)}, {fcur/flen*100:.1f}% complete, z={cur_z:.2f}, layer #{lyn}, filament {eabs/1000:.3f}m   \r",end="",flush=True)
+      
    if not os.path.exists(conf['device']):
       eprint(f"cannot open device <{conf['device']}>, abort")
       return
@@ -277,23 +431,34 @@ def printGcode(f):
    if not ser:
       eprint(f"cannot open device <{conf['device']}>, abort")
       return 
+
+   flen = os.path.getsize(f)
+
    fh = open(f,"r")
    if not fh:
       eprint(f"cannot read file <{f}> doesn't exist, ignored")
       return 
-   for l in fh.getlines():
+   while 1:
+      l = fh.readline()
+      if not l:
+         break
+      parse(l)
+      update()
+      lprint(f"=> {l}")
       ser.write(l.encode())
       r = ''
       while 1:
          _ = ser.read(255)
          r += _.decode()
          if len(_)<255:
+            lprint(f"<= {r}")
             break
          time.sleep(0.05)
       if re.search('ok\n',r):
          pass
    ser.close()   
-
+   print("")
+   
 def convertToMesh(f,fo):
    m = [ ]
    if preg_match('\.(scad)$',f,m):
@@ -316,8 +481,17 @@ def execx(a,**argv):
             eprint(l)
       
    return p.returncode
-   
-   
+
+def graceful(*args,**argv):               # -- graceful calling function, optional on_error with default value in case of error
+   args = list(args)
+   f = args.pop(0)
+   try:
+      return f(*args)
+   except:
+      pass
+   if 'on_error' in argv:
+      return argv['on_error']
+      
 def lprint(*args,**argv):
    if ('level' in argv and argv['level']<=conf['verbose']) or ('level' not in argv and conf['verbose']):
       if 'level' in argv:
@@ -327,8 +501,12 @@ def lprint(*args,**argv):
 def eprint(*args,**argv):
    print(f"{me}: {datetime.datetime.now().isoformat()}: ERROR:",*args)
    if 'exit' in argv and argv['exit']:
-      sys.exit(argv['exit'])
+      clean_exit(argv['exit'])
 
+def iprint(*args):
+   if not conf['quiet']:
+      print(f"{me}:",*args)
+   
 def pprint(*args,start=False,end=False,tail=False):
    if conf['verbose']==0:
       a = [ ]
@@ -346,8 +524,8 @@ def mopen(f,m="r"):
       if os.path.exists(os.path.join(b,f)):
          return open(os.path.join(b,f),m)
 
-def iopen(f):
-   return iter([ os.path.join(b,f) for b in basedirs if os.path.exists(os.path.join(b,f)) ])
+def ipaths(f,m="r"):
+   return iter([ os.path.join(b,f) for b in basedirs if os.path.exists(os.path.join(b,f))])
 
 # -----------------------------------------------------------------------------------------------------
 
@@ -355,6 +533,7 @@ s2l = { "o": "output", "p": "printer", "v": "verbose", "d": "device", "s": "slic
 s2a = { "o": 1, "p": 1, "d": 1, "s": 1 }
 preproc = { "scad": "stl", "jscad": "stl", "zcad": "stl" }
 
+post = { }
 fs = [ ]
 i = 0
 while i < len(sys.argv):
@@ -367,7 +546,8 @@ while i < len(sys.argv):
             conf[s2l[k]] = sys.argv[i]
          elif k in s2l:
             conf[s2l[k]] += 1
-         conf_src[s2l[k]] = 'cli'
+         if k in s2l:
+            conf_src[s2l[k]] = 'cli'
    elif preg_match('^--([\w\.\-]+)$',a,m):
       k = m[1]
       k = re.sub('-','_',k)
@@ -376,10 +556,15 @@ while i < len(sys.argv):
    elif preg_match('^--([\w\.\-]+)=(.*)$',a,m):
       k,v = m[1],m[2]
       k = re.sub('-','_',k)
+      if preg_match('^post_(\w+)',k,m):
+         post[m[1]] = v
       conf[k] = v
       conf_src[k] = 'cli'
    elif preg_match('^@([\w\.\-]+)$',a,m):
-      pass
+      for f in ipaths(os.path.join("macro",m[1]+".ini")):
+         for k,v in parse_ini(f).items():
+            conf[k] = v
+            conf_src[k] = f"macro {m[1]}"
    else:
       fs.append(a)
    i += 1
@@ -392,7 +577,7 @@ if len(fs):
    cmd = fs.pop(0)
 else:
    if len(fs) and os.path.exists(fs[0]):
-      print("WARN: no command given, 'print' assumed")
+      iprint("WARN: no command given, 'print' assumed")
       cmd = 'print'
 
 fh = mopen(os.path.join("slicer","slicers.json"),"r")
@@ -402,35 +587,59 @@ if fh:
 else:
    eprint(f"no <{os.path.join('slicer','slicers.json')}> found anywhere: {basedirs}")
 
-for f in iopen(os.path.join("printer","base.ini")):
+for f in ipaths(os.path.join("printer","default.ini")):     # -- base for all settings (slicer/printer independent)
    for k,v in parse_ini(f).items():
+      if k in conf_src: 
+         continue
       conf[k] = v
 
 if 'printer' in conf:
    found = 0
-   for f in iopen(os.path.join("printer",f"{conf['printer']}.ini")):
+   for f in ipaths(os.path.join("printer",f"{conf['printer']}.ini")):
       for k,v in parse_ini(f).items():
-         if k in conf_src and conf_src[k] == 'cli':
+         if k in conf_src: 
             continue
          conf[k] = v
       found += 1
    if found==0:
-      lprint(f"WARN: no printer config/profile found anywhere for <{conf['printer']}>",level=0)
+      eprint(f"no printer config/profile found anywhere for <{conf['printer']}>")
       
-for k in conf:                         # -- transfer conf into slicing
+for k in conf:                                              # -- transfer conf into slicing
    if k not in intern_keys:
       slicing[k] = conf[k]
 
 if conf['verbose']:
    lprint("conf:",json.dumps(conf,indent=3))
    lprint("slicing:",json.dumps(slicing,indent=3))
-print(f"printer: \"{slicing['machine_name']}\" ({conf['printer']}), device: {conf['device']}, layer/h: {slicing['layer_height']}, nozzle line/w: {slicing['line_width']}")
+
+iprint(f"conf: \"{slicing['machine_name']}\" ({conf['printer']}), device: {conf['device']}, build/v: {slicing['machine_width']}x{slicing['machine_depth']}x{slicing['machine_height']}, layer/h: {slicing['layer_height']}, nozzle/d: {slicing['nozzle_diameter']}")
+
+slicing['machine_width'] = int(slicing['machine_width'])
+slicing['machine_depth'] = int(slicing['machine_depth'])
+slicing['machine_height'] = int(slicing['machine_height'])
 
 if cmd=='slice' or cmd=='preview' or cmd=='print':
    fsm = [ ]    # -- meshs
    fsg = [ ]    # -- gcode
 
-   for f in fs:
+   def place_mesh(m):                  # -- only needed for meshs which need to be placed absolute (like for cura*), otherwise we rather change bed-center 
+      if conf['slicer'] in ['cura','cura4','cura5','cura-slicer']:
+         mm = m.bounds
+         sz = mm[1]-mm[0]
+         if 'placement' in conf and conf['placement']!='none':
+            pos = [ 0, 0 ]    # -- cura's default to center of bed, hence pos is relative (not abs) to machine_width/depth center
+            # pos = [slicing['machine_width']/2,slicing['machine_depth']/2]
+            if conf['placement']=='random':
+               pos[0] += random.uniform(-1,1)*(slicing['machine_width']*.45-sz[0]/2)
+               pos[1] += random.uniform(-1,1)*(slicing['machine_depth']*.45-sz[1]/2)
+            #print(pos,sz)
+            #m.apply_translation([-mm[0][0]-sz[0]/2+pos[0],-mm[0][1]-sz[1]/2+pos[1],0])
+            #print([-mm[0][0]-sz[0]/2+pos[0],-mm[0][1]-sz[1]/2+pos[1],0])
+            #print([-mm[0][0]-sz[0]/2,-mm[0][1]-sz[1]/2,0])
+            print(pos)
+            m.apply_translation([pos[0],pos[1],0])
+   
+   for i,f in enumerate(fs):
       pprint(f"processing <{f}>",start=True)
 
       inline = [ e for e in conf if e in preproc ]
@@ -470,7 +679,7 @@ if cmd=='slice' or cmd=='preview' or cmd=='print':
             f = fm
             ext = preproc[ext]
 
-         if conf['recenter'] or conf['relevel'] or 'rotate' in conf or 'scale' in conf or 'placement' in conf:
+         if conf['recenter'] or conf['relevel'] or 'rotate' in conf or 'scale' in conf: # or 'placement' in conf:
             pprint(f"prepare")
 
             m = trimesh.load(f)
@@ -478,7 +687,7 @@ if cmd=='slice' or cmd=='preview' or cmd=='print':
             sz = [ mm[1][i]-mm[0][i] for i in range(3) ]
    
             # -- recenter X,Y and level Z 
-            if ('recenter' in conf and conf['recenter']) or ('relevel' in conf and conf['relevel']):
+            if conf['placement']!= 'none' and (('recenter' in conf and conf['recenter']) or ('relevel' in conf and conf['relevel'])):
                tr = [(mm[0][j]-mm[1][j])/2 for j in range(3)]
                pprint(f"translate <{tr}>")
                m.apply_translation(tr)
@@ -499,17 +708,18 @@ if cmd=='slice' or cmd=='preview' or cmd=='print':
             if 'scale' in conf:
                if re.search(',',conf['scale']):
                   sc = [ ]
-                  abs = False
+                  abs = -1
                   for i,f in enumerate(conf['scale'].split(',')):
                      if re.search('mm$',f):
                         f = float(re.sub('mm$','',f))
                         fa = f / (mm[1][i]-mm[0][i])
-                        abs = True
+                        f = fa
+                        abs = i                                # -- keep record which axis is absolute defined
                      else:
                         f = float(f)
                      sc.append(f)
-                  if abs:
-                     sc = [ fa for i in range(3) ]
+                  if abs >= 0:
+                     sc = [ sc[abs] if f==0 else f for i,f in enumerate(sc) ]    # -- any axis with scale = 0 => scale same as abs axis
                else:
                   sc = [float(conf['scale']) for i in range(3) ]
                pprint(f"scale <{sc}>")
@@ -520,52 +730,53 @@ if cmd=='slice' or cmd=='preview' or cmd=='print':
                pprint(f"relevel",-mm[0][2])
                m.apply_translation([0,0,-mm[0][2]])
 
-            if 'placement' in conf:
-               if conf['placement']=='center':
-                  m.apply_translation([slicing['build_width']/2,slicing['build_depth']/2,0])
-               elif conf['placement']=='random':
-                  xoff = random.random()*.8*(slicing['build_width']/2-(mm[0][0]-mm[1][0])/2)
-                  yoff = random.random()*.8*(slicing['build_depth']/2-(mm[0][1]-mm[1][1])/2)
-                  m.apply_translation([slicing['build_width']/2+xoff,slicing['build_depth']/2+yoff,0])
-
-            for fmt in slicer[conf['slicer']]['formats'].keys():     # -- prefered format
-               fm = tmpfn(fmt)
-               break
+            place_mesh(m)
+            
+            fmt = list(slicer[conf['slicer']]['formats'].keys())[0]  # -- prefered format
+            fm = tmpfn(fmt)
             tmp.append(fm)
 
+            lprint(f"mesh {list(m.bounds[1]-m.bounds[0])}: {[list(v) for v in list(m.bounds)]}")
+
             lprint(f"export to <{fm}>")
-            m.export(fm)      # -- we need to save the changed mesh again
+            m.export(fm)                                       # -- we need to save the changed mesh again
             f = fm
             fsm.append(f)
       else:
          lprint(f"WARN: strange filename <{f}>, cannot determine what to do, skipped",level=0)
       pprint("",tail=True)
-      
+
+   pprint("preparing",start=True)   
+
    # -- at this point, we have all the meshes, ready to slice
+
    if 'multiply_part' in conf:
       n = int(conf['multiply_part'])
-      pprint(f"multiply part {n}x")
+      pprint(f"multiply part {n}x") #,start=True)
       fsm = [ m for i in range(n) for m in fsm ]
-
+      #pprint("",tail=True)
+      
    if len(fsm)>1: # and 'multi_file' in slicer[conf['slicer']] and not slicer[conf['slicer']]['multi_file']:      
       # -- merge multiple repositioned meshes into one
-      pprint(f"merge {len(fsm)} part(s)",start=True)
+      pprint(f"merge {len(fsm)} part(s)") #,start=True)
       xp,yp = 0,0
       ys = 0
       wn = int(math.sqrt(len(fsm)))
       if 'cols' in conf:
          wn = int(conf['cols'])
+      elif 'rows' in conf:
+         wn = int(len(fsm)/int(conf['rows']))
       ms = [ ]
       n = 0
       for f in fsm:
          m = trimesh.load(f)
          mm = m.bounds
-         sz = [ mm[1][i]-mm[0][i] for i in range(3) ]
+         sz = mm[1]-mm[0]
          if 'cols' in conf:
             if n>0 and n%wn == 0:
                xp = 0
                yp += ys + 5
-         elif xp+sz[0] > slicing['build_width']*.9:
+         elif xp+sz[0] > slicing['machine_width']*.9:
             xp = 0
             yp += ys+5
          lprint(f"repos #{n} {[xp,yp]}")
@@ -574,7 +785,13 @@ if cmd=='slice' or cmd=='preview' or cmd=='print':
          xp += sz[0]+5
          n += 1
          ms.append(m)
+
       m = trimesh.util.concatenate(ms)
+
+      place_mesh(m)
+      
+      lprint(f"mesh {list(m.bounds[1]-m.bounds[0])}: {[list(v) for v in list(m.bounds)]}")
+            
       fmt = list(slicer[conf['slicer']]['formats'].keys())[0]
       f = tmpfn(fmt)
       m.export(f)
@@ -583,7 +800,7 @@ if cmd=='slice' or cmd=='preview' or cmd=='print':
       fsm = [ f ]
    
    if len(fsm):                  # -- any mesh to process?
-      pprint(f"slicing part(s) with {conf['slicer']}",start=True)
+      pprint(f"slicing part(s) with {conf['slicer']}") #,start=True)
       if 'output' in conf:
          fo = conf['output']
          if os.path.exists(fo):
@@ -592,12 +809,16 @@ if cmd=='slice' or cmd=='preview' or cmd=='print':
       else:
          fo = tmpfn('gcode')
          tmp.append(fo)
-      sliceMesh(fsm,fo)
+      sliceMesh(fsm,fo,m)
       fsg.append(fo)
 
    pprint("",tail=True)
-   
-   # -- at this point, we have the gcode file(s)
+
+   #if 'post' in conf:
+   #   for p in conf['post'].split(','):
+   #      subprocess.run([])
+
+   # -- at this point, we have all the gcode file(s)
    for f in fsg:
       if cmd == 'preview':
          previewGcode(f)
@@ -605,14 +826,19 @@ if cmd=='slice' or cmd=='preview' or cmd=='print':
          printGcode(f)
       
 elif cmd == 'gconsole':
+   #from prompt_toolkit import prompt
    ser = connectSerial(conf['device'])
-   print(f"Hint: use CTRL-C or type 'quit' or 'exit' to quit the session")
+   iprint(f"Hint: use CTRL-C or type 'quit' or 'exit' to quit the session")
    while 1:
       print("> ",end="",flush=True)
-      l = sys.stdin.readline()
+      l = sys.stdin.readline()      # -- no history or repeat command, but works as expected (doesn't block ser.write() below)
+      #l = prompt('')    # -- holds ser.write() back
+      #l = input()       # -- holds ser.write() back too (facepalm)
       if re.search('(quit|exit)',l):
          break
       ser.write(l.encode())
+      lprint(f"sent <{l}>")
+      t = time.time()
       while 1:
          s = ""
          while 1:
@@ -623,6 +849,8 @@ elif cmd == 'gconsole':
          if len(s):
             print(f"% {s}")   
          if re.search('ok\n',s):
+            break
+         if time.time()-t > 10:
             break
          time.sleep(0.01)
          

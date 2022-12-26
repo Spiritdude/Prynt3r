@@ -13,7 +13,8 @@ all::
 
 requirements::
 	sudo apt install ser2net socat slic3r
-	sudo apt install yagv
+	sudo apt install yagv libperl-dev
+	pip3 install -r requirements.txt
 
 install::
 	sudo cp ${CMD} ${DEST_BIN}/
