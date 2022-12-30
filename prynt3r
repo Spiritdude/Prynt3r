@@ -15,6 +15,7 @@
 #  4) executing map.ini /usr/share/prynt3r/slicer/<slicer>/ on base.ini (slicer:slicing)
 #
 # History:
+# 2022/12/30: 0.0.3: macros work as well, fine-tuning remote printing
 # 2022/12/28: 0.0.2: mostly functional, slicers work: slic3r, prusa, cura5, cura-slicer, lab, voxgl, vox3l (not yet super, kirimoto, mandoline, goslice, enoch, metatron, 5dmaker, zplus)
 # 2022/12/19: 0.0.1: cli args parsed, early .ini parsing without conditional variables, local and remote printer access works
 # 2022/12/17: start coding
@@ -24,7 +25,8 @@ import trimesh
 import perl5
 
 APPNAME = "Prynt3r"
-VERSION = "0.0.2"
+VERSION = "0.0.3"
+APPREPO = f"https://github.com/Spiritdude/{APPNAME}"
 
 me = os.path.basename(sys.argv.pop(0))
 
@@ -32,11 +34,13 @@ tmp = [ ]
 
 basedirs = [ "/usr/share/prynt3r", os.path.join(os.getenv('HOME'),".config/prynt3r") ]
 
-banner = f"""   ___                __  ____    
-  / _ \______ _____  / /_|_  /____
- / ___/ __/ // / _ \/ __//_ </ __/
-/_/  /_/  \_, /_//_/\__/____/_/    {VERSION}
-         /___/                    
+banner = f"""          ____    .              __ _____         .
+     *   / __ \_______* ______  / /|__  /_____                 *
+        / /_/ / ___/ / / / __ \/ __//_ </ ___/  .         |             *
+   .   / ____/ /  / /_/ / / / / /____/ / /              -=*=-      .   
+      /_/   /_/   \__, /_/ /_/\__/____/_/        *   .    |
+                 /____/                     V{VERSION}           *          .
+      {APPREPO}
 """ 
 
 conf = {
@@ -80,8 +84,21 @@ def preg_match(r,s,m):
    return False
 
 def usage():
-   print(f"""{APPNAME} {VERSION} Usage: [<opts>] <cmd> <file1> ...
+   print(f"{banner}")
+   print(f"""{APPNAME} {VERSION} USAGE: [<opts>] <cmd> <arg1> ...
+
+   commands:
+      slice <file1> ...    slice file(s) into single gcode, e.g. use -o <fn> or --output=<fn>
+      print <file1> ...    slice and send gcode to printer local or remote, e.g. define -d <dev> or --device=<dev>
+      preview <file1> ...  slice file(s) into single gcode and launch gcode viewer
+      gconsole             starts interactive g-code console
+      log [<s>] [#<n>]     list log, query term <s> or list log entry '#<n>'
+      client               start client process, so remote {me} can access it
+      
    options:
+      --help               print this message
+      --version            print version and exit
+      
       --device=<dev>       set device (default: {conf['device']})
         -d <dev>
    
@@ -93,6 +110,10 @@ def usage():
 
       --gcode-viewer=<cmd> set gcode previewer (default: {conf['gcode_viewer']})
 
+      --verbose=<n>        increase verbosity
+         -vvv
+      --extended or -x     extended output, e.g. for 'log' command
+      
       --quiet or -q        stay quiet, only output warnings or errors
       
       --placement=<loc>    set location: 'none', 'center', 'random' (default: none)
@@ -118,13 +139,8 @@ def usage():
    slicing options (slicer independent):""")
    for k,v in slicing.items():
       k_ = re.sub('_','-',k)
-      print(f"   --{k_}=<v>{' '*(20-len(k_))} set {k_} (default: {json.dumps(v)})")
+      print(f"      --{k_}=<v>{' '*(20-len(k_))} set {k_} (default: {json.dumps(v)})")
    print(f"""
-   commands:
-      slice <file1> ...    slice file(s) into single gcode, e.g. use -o <fn> or --output=<fn>
-      print <file1> ...    slice and send gcode to printer local or remote, e.g. define -d <dev> or --device=<dev>
-      preview <file1> ...  slice file(s) into single gcode and launch gcode viewer
-      gconsole
       
    examples:
       {me} print cube.stl
@@ -133,6 +149,10 @@ def usage():
       {me} -p ashtar-k-1 -s cura5 print cube.stl -d tcp:192.168.1.32:0
       {me} -s prusa slice cube.stl -o a.gcode 
       {me} preview cube.stl 
+      {me} log 
+      {me} log cube.stl -v
+      {me} log '#100' -xv
+      {me} -d /dev/ttyACM0 client &
       {me} -d /dev/ttyACM1 gconsole
       > M115
 """)
@@ -152,7 +172,7 @@ def clean_exit(*args,exit=0):
       for f in tmp:
          if os.path.exists(f):
             os.remove(f)
-   lprint(f"exit with {exit}")
+   lprint(f"exit process {os.getpid()} with {exit}")
    sys.exit(exit)
 
 def parse_ini(f):
@@ -284,8 +304,10 @@ def sliceMesh(f,fo,ms):
       if conf['slicer'] in [ 'prusa', 'super' ]:
          cmd.append('--export-gcode')                             # -- avoid GUI
       if conf['verbose']>1:
-         if conf['slicer']=='super':
+         if conf['slicer'] in [ 'prusa', 'super' ]:
             cmd.append(f"--loglevel={conf['verbose']-1}")
+         elif conf['slicer'] == 'slic3r':
+            pass
          else:
             cmd.append('-'+'v'*(conf['verbose']-1))
 
@@ -361,7 +383,10 @@ def deviceLock(d,set=0,unset=0,update=0):
       print(os.getpid(),file=open(lfn,"w"))
       
 def writeSerial(ser,s):
-   ser.write(s.encode())
+   try:
+      ser.write(s.encode())
+   except Exception as e:
+      eprint(f"exception {e} occured",exit=1)
 
 def readSerial(ser,timeout=10,on_error=''):
    r = ''
@@ -406,26 +431,35 @@ def connectSerial(d):
          n += 3380
          if not os.path.exists(sdev):
             if os.fork()==0:
-               if os.fork()==0:
+               def do_nothing(*args):
+                  pass
+               #signal.signal(signal.SIGINT,sigint_orig)     # -- reset SIGINT 
+               signal.signal(signal.SIGINT,do_nothing)      # -- do nothing, but die silently instead
+               lprint(f"child[1] process {os.getpid()}",level=3)
+               if 1 or os.fork()==0:
+                  #lprint("child[2] process {os.getpid()}",level=3)
                   lprint(f"launch socat {host}:{n} ({sdev})")
+                  # -- NOTE: crtscts screws up communication reliability in this case (don't use it)
                   lprint(['socat',f'pty,raw,echo=0,b{conf["baudrate"]},link={sdev}',f'tcp:{host}:{n}'],level=2)
                   subprocess.run(['socat',f'pty,raw,echo=0,b{conf["baudrate"]},link={sdev}',f'tcp:{host}:{n}'])
                   lprint("socat exited")
                   sys.exit(0)
-               os.wait()
+               #os.wait()
                lprint(f"socat ended")
                if os.path.exists(sdev):
                   os.remove(sdev)
                sys.exit(0)
             time.sleep(0.5)              # -- give it time to startup because we probe the link as next
+         else:
+            pass                         # -- file exists, we assume the socat is still running, let's reuse it
          d = sdev
    
    if not os.path.exists(d):
       eprint(f"device {d} doesn't exist, abort",exit=1)
 
    lprint(f"opening serial <{d}>")   
-   #ser = serial.Serial(d,rtscts=True,dsrdtr=True,timeout=0.05)
-   ser = serial.Serial(d,timeout=0.05)
+   ser = serial.Serial(d,rtscts=True,dsrdtr=True,timeout=0.05)
+   #ser = serial.Serial(d,timeout=0.05)
    
    time.sleep(2)                          # -- allow older/slower 8-bit boards to get ready
 
@@ -521,6 +555,7 @@ def printGcode(f):
 
    def abort_print(*args):
       writeSerial(ser,slicing['abort_gcode'])
+      time.sleep(2)                                # -- give it some time before we sever connection
       clean_exit()
       
    ser = connectSerial(conf['device'])
@@ -542,11 +577,15 @@ def printGcode(f):
 
    lst = time.time()
 
-   signal.signal(signal.SIGINT, abort_print)
+   signal.signal(signal.SIGINT,abort_print)        # -- reassign SIGINT, so we can send optional abort-gcode
+
+   n_ok = 0
+   n_queue = 3
+   
    while ser.isOpen():
       l = fh.readline()
       g = gcode(l)
-      if not l:
+      if not l:    
          break
       parse(l)
       update()
@@ -557,23 +596,30 @@ def printGcode(f):
          continue
       lprint(f"=> {json.dumps(l)}",level=2)
       ser.write(l.encode())
+      if re.search('^G',l):            # -- count each G* expecting in 'ok\n'
+         n_ok += 1
       r = ''
       while 1: #ser.inWaiting():
          _ = ser.read(255)
          if len(_)>0:
-            r += _.decode()
+            r += _.decode()                       # -- FIXME: here some runtime error could occur, if this happens, something terrible happened (bad cable, bad connection, out of sync systems etc), not sure if and how to recover
             if len(_)<255:
                lprint(f"   <= {json.dumps(r)}",level=2)
                if 1:    # -- NOTE: 8/32bit boards with Marlin require stricter communication (awaiting OK for G* commands, otherwise queue overflows and commands are dropped)
-                  if re.search('^G',l):
-                     if re.search('ok\n',r):      # -- wait for 'ok' for G*
-                        break
+                  n_ok -= r.count('ok\n')
+                  if n_ok<=0:                     # -- we might fall below 0 as some M* commands also respons with 'ok\n'
+                     n_ok = 0
+                  if n_ok >= n_queue and fh.tell()<flen:    # -- we allow n_queue 'ok\n's to wait for, but only wait if we haven't reached end of file
+                  #if re.search('^G',l):
+                     pass
+                     #if re.search('ok\n',r):      # -- wait for 'ok' for G*
+                     #   break
                   else:                           # -- all others we don't await 'ok' (like M* commands)
                      break
                else:
                   break
-         time.sleep(0.05)
-         lprint("   waiting for response",level=3)
+         time.sleep(.001) 
+         lprint(f"   waiting for response (n_ok={n_ok})",level=4)
          
       if time.time()-lst > 3:
          deviceLock(conf['device'],update=1)
@@ -603,7 +649,8 @@ def printGcode(f):
    print(json.dumps(job),file=fhl)
    fhl.close()
    
-   print("")
+   if conf['verbose']==0 and not conf['quiet']:
+      print("")               # -- required to clear single line updates above with "\r"
    
 def convertToMesh(f,fo):
    m = [ ]
@@ -675,6 +722,8 @@ def ipaths(f,m="r"):
 
 # -----------------------------------------------------------------------------------------------------
 
+sigint_orig = signal.getsignal(signal.SIGINT)
+   
 signal.signal(signal.SIGINT, clean_exit)
 
 s2l = { "o": "output", "p": "printer", "v": "verbose", "d": "device", "s": "slicer", "k": "keep", "x": "extended" }
@@ -710,18 +759,30 @@ while i < len(sys.argv):
          post[m[1]] = v
       conf[k] = v
       conf_src[k] = 'cli'
-   elif preg_match('^@([\w\.\-]+)$',a,m):
+   elif preg_match('^@(\S+)$',a,m):
+      found = 0
       for f in ipaths(os.path.join("macro",m[1]+".ini")):
+         found = 1
          for k,v in parse_ini(f).items():
             conf[k] = v
             conf_src[k] = f"macro {m[1]}"
+      if not found:
+         eprint(f"unknown macro <{m[1]}> not found anywhere",exit=1)
    else:
       fs.append(a)
    i += 1
 
 cmd = ''
 
-print(f"== {APPNAME} {VERSION} == https://github.com/Spiritdude/Prynt3r")
+if 'help' in conf:
+   usage()
+
+if 'version' in conf:
+   print(f"{APPNAME} {VERSION}")
+   sys.exit(0)
+   
+if len(fs):
+   iprint(f"== {APPNAME} {VERSION} == {APPREPO}")
 
 if len(fs):
    cmd = fs.pop(0)
@@ -730,45 +791,46 @@ else:
       iprint("WARN: no command given, 'print' assumed")
       cmd = 'print'
 
-fh = mopen(os.path.join("slicer","slicers.json"),"r")
-if fh:
-   slicer = json.load(fh)
-   fh.close()
-else:
-   eprint(f"no <{os.path.join('slicer','slicers.json')}> found anywhere: {basedirs}")
-
-for f in ipaths(os.path.join("printer","default.ini")):     # -- base for all settings (slicer/printer independent)
-   for k,v in parse_ini(f).items():
-      if k in conf_src: 
-         continue
-      conf[k] = v
-
-if 'printer' in conf:
-   found = 0
-   for f in ipaths(os.path.join("printer",f"{conf['printer']}.ini")):   # -- printer specifics (slicer/printer independent)
+if cmd in ['slice','preview','print']:
+   fh = mopen(os.path.join("slicer","slicers.json"),"r")
+   if fh:
+      slicer = json.load(fh)
+      fh.close()
+   else:
+      eprint(f"no <{os.path.join('slicer','slicers.json')}> found anywhere: {basedirs}")
+   
+   for f in ipaths(os.path.join("printer","default.ini")):     # -- base for all settings (slicer/printer independent)
       for k,v in parse_ini(f).items():
          if k in conf_src: 
             continue
          conf[k] = v
-      found += 1
-   if found==0:
-      eprint(f"no printer config/profile found anywhere for <{conf['printer']}>")
-      
-if 1:
-   for k in conf:                                              # -- transfer conf into slicing
-      if k not in intern_keys:
-         slicing[k] = conf[k]
-
-if conf['verbose']:
-   lprint("conf:",json.dumps(conf,indent=3))
-   lprint("slicing:",json.dumps(slicing,indent=3))
-
-iprint(f"conf: \"{slicing['machine_name']}\" ({conf['printer']}), device: {conf['device']}, build/v: {slicing['machine_width']}x{slicing['machine_depth']}x{slicing['machine_height']}, layer/h: {slicing['layer_height']}, nozzle/d: {slicing['nozzle_diameter']}")
-
-for k in "machine_width,machine_depth,machine_height".split(","):
-   slicing[k] = int(slicing[k])
+   
+   if 'printer' in conf:
+      found = 0
+      for f in ipaths(os.path.join("printer",f"{conf['printer']}.ini")):   # -- printer specifics (slicer/printer independent)
+         for k,v in parse_ini(f).items():
+            if k in conf_src: 
+               continue
+            conf[k] = v
+         found += 1
+      if found==0:
+         eprint(f"no printer config/profile found anywhere for <{conf['printer']}>")
+         
+   if 1:
+      for k in conf:                                              # -- transfer conf into slicing
+         if k not in intern_keys:
+            slicing[k] = conf[k]
+   
+   if conf['verbose']:
+      lprint("conf:",json.dumps(conf,indent=3))
+      lprint("slicing:",json.dumps(slicing,indent=3))
+   
+   for k in "machine_width,machine_depth,machine_height".split(","):
+      slicing[k] = int(slicing[k])
 
 if cmd=='slice' or cmd=='preview' or cmd=='print':
+   iprint(f"conf: \"{slicing['machine_name']}\" ({conf['printer']}), device: {conf['device']}, build/v: {slicing['machine_width']}x{slicing['machine_depth']}x{slicing['machine_height']}, layer/h: {slicing['layer_height']}, nozzle/d: {slicing['nozzle_diameter']}")
+
    fsm = [ ]    # -- meshs
    fsg = [ ]    # -- gcode
 
@@ -1005,9 +1067,13 @@ elif cmd == 'gconsole':
          
 elif cmd == 'log':
    n = 0      
-   
+   eabs = { }
+   tasks = { }
+
    def disp(e):
-      if conf['verbose']>0:
+      if 'filament_used' not in e:
+         e['filament_used'] = 0
+      if conf['verbose']>0 or 'extended' in conf:
          if 'extended' in conf:
             print(json.dumps(e,indent=3))
          else:
@@ -1016,22 +1082,62 @@ elif cmd == 'log':
          ago = (time.time()-e['end_time'])/60/60
          ago = f"{int(ago/24)%24}d {ago%24:.0f}h ago"
          _ = ', '.join([os.path.basename(f) if re.search('\.\w+$',f) else f for f in e['files']])
-         print(f"#{n}: {e['conf']['machine_name']} ({e['conf']['printer']}): {_} {ago}")
+         print(f"#{n}: {e['conf']['machine_name']} ({e['conf']['printer']}): {_} {ago}, {e['filament_used']/1000:.3f}m")
+   
+   if len(fs):
+      iprint(f"querying {fs}")
 
    fh = open(os.path.join(os.getenv("HOME"),".prynt3r","log.json"),"r")
+   
+   catch = -1
+   m = [ ]
+
+   hits = 0
+   
+   if len(fs)>0 and preg_match('^#(\d+)$',fs[0],m):
+      catch = int(m[1])
+
    for l in fh.readlines():
       e = json.loads(l)
+      if e['conf']['printer'] not in eabs:
+         eabs[e['conf']['printer']] = 0
+      if e['conf']['printer'] not in tasks:
+         tasks[e['conf']['printer']] = 0
+      h = 0
       if len(fs):
-         for f in fs:
-            if l.find(f)>=0:
-               disp(e)
-               break
+         if catch>=0:
+            if n==catch:
+               h = 1
+         else:
+            ll = l.lower()
+            for f in fs:
+               if ll.find(f)>=0:
+                  h += 1
+            if h == len(fs):
+               h = 1
+            else:
+               h = 0
       else:
+         h = 1
+      if h:
          disp(e)
+         if 'filament_used' in e:
+            eabs[e['conf']['printer']] += e['filament_used']
+         tasks[e['conf']['printer']] += 1
+         hits += 1
       n += 1
-   if not (conf['verbose']>0 or 'extended' in conf):
-      print(f"   {n} entries total")
 
+   if not (conf['verbose']>0 or 'extended' in conf):
+      etot = sum([v for v in eabs.values()])
+      print(f"   {hits} entries, {etot/1000:.3f}m filament used")
+      if etot==0:
+         etot = 1
+      if len(eabs.keys())>1:
+         for k,v in eabs.items():
+            if v>0:
+               print(f"      {k}: {tasks[k]:,} prints, {v/1000:.3f}m ({100/etot*v:.1f}%)")
+   sys.exit(0)
+   
 elif cmd == 'client':
    if not os.path.exists(conf['device']):
       eprint(f"<{conf['device']}> doesn't exist",exit=1)
@@ -1050,9 +1156,9 @@ elif cmd == 'client':
    tmp.append(f)
    
    if os.fork()==0:   
-      p = subprocess.run(["ser2net","-n","-C",f])
+      p = subprocess.run(["ser2net","-n","-c",f])
    if not conf['quiet']:
-      iprint(f"client started, use --device=tcp:<hostip>:{n}")
+      iprint(f"client started, use --device=tcp:<hostip>:{n} on the host")
       iprint(f"use CTRL-C to kill/end gateway")
       iprint(f"NOTE: anybody on your local network has the capability to access &")
       iprint(f"      control this printer; it is YOUR RESPONSIBILITY to secure")
@@ -1061,6 +1167,7 @@ elif cmd == 'client':
    clean_exit()
       
 else:
+   eprint(f"unknown command <{cmd}>: only print, slice, preview, log or client available")
    usage()
 
 clean_exit()

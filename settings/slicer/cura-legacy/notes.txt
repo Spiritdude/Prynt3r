@@ -1,0 +1,166 @@
+    int nozzleSize;
+    int layerThickness;
+    int initialLayerThickness;
+    int filamentDiameter;
+    int filamentFlow;
+    int layer0extrusionWidth;
+    int extrusionWidth;
+    int insetCount;
+    int downSkinCount;
+    int upSkinCount;
+    int skirtDistance;
+    int skirtLineCount;
+    int skirtMinLength;
+
+    //Retraction settings
+    int retractionAmount;
+    int retractionAmountPrime;
+    int retractionAmountExtruderSwitch;
+    int retractionSpeed;
+    int retractionMinimalDistance;
+    int minimalExtrusionBeforeRetraction;
+    int retractionZHop;
+
+    int enableCombing;
+    int enableOozeShield;
+    int wipeTowerSize;
+    int multiVolumeOverlap;
+
+    int initialSpeedupLayers;
+    int initialLayerSpeed;
+    int printSpeed;
+    int inset0Speed;
+    int insetXSpeed;
+    int moveSpeed;
+    int fanFullOnLayerNr;
+
+    //Infill settings
+    int sparseInfillLineDistance;
+    int infillOverlap;
+    int infillSpeed;
+    int infillPattern;
+    int skinSpeed;
+    int perimeterBeforeInfill;
+
+    //Support material
+    int supportType;
+    int supportAngle;
+    int supportEverywhere;
+    int supportLineDistance;
+    int supportXYDistance;
+    int supportZDistance;
+    int supportExtruder;
+
+    //Cool settings
+    int minimalLayerTime;
+    int minimalFeedrate;
+    int coolHeadLift;
+    int fanSpeedMin;
+    int fanSpeedMax;
+
+    //Raft settings
+    int raftMargin;
+    int raftLineSpacing;
+    int raftBaseThickness;
+    int raftBaseLinewidth;
+    int raftBaseSpeed;
+    int raftInterfaceThickness;
+    int raftInterfaceLinewidth;
+    int raftInterfaceLineSpacing;
+    int raftFanSpeed;
+    int raftSurfaceThickness;
+    int raftSurfaceLinewidth;
+    int raftSurfaceLineSpacing;
+    int raftSurfaceLayers;
+    int raftSurfaceSpeed;
+    int raftAirGap;
+    int raftAirGapLayer0;
+
+    FMatrix3x3 matrix;
+    IntPoint objectPosition;
+    int objectSink;
+    int autoCenter;
+
+    int fixHorrible;
+    int spiralizeMode;
+    int simpleMode;
+    int gcodeFlavor;
+
+
+
+-s filamentFlow=100 
+-s layerThickness=100 
+-s initialLayerThickness=300 
+-s supportZDistanceBottom=150 
+-s supportZDistanceTop=150 
+-s supportBottomStairDistance=500 
+-s initialSpeedupLayers=4 
+-s minimalFeedrate=10 
+-s preSwitchExtruderCode= 
+-s insetXSpeed=30 
+-s retractionZHop=0 
+-s extruderOffset3.X=0 
+-s extruderOffset3.Y=0 
+-s gcodeFlavor=GCODE_FLAVOR_ULTIGCODE 
+-s postSwitchExtruderCode= 
+-s retractionSpeed=40 
+-s infillOverlap=15 
+-s inset0Speed=20 
+-s coolHeadLift=0 
+-s extrusionWidth=400 
+-s upSkinCount=6 
+-s initialLayerSpeed=20 
+-s minimalLayerTime=5 
+-s infillSpeed=40 
+-s fanSpeedMax=100 
+-s enableCombing=1 
+-s fanSpeedMin=100 
+-s supportXYDistance=700 
+-s supportExtruder=-1 
+-s supportType=ZIGZAG 
+-s supportZDistance=150 
+-s supportEverywhere=1 
+-s supportAngle=60 
+-s supportJoinDistance=600 
+-s supportBridgeBack=100 
+-s supportSpeed=20 
+-s supportConnectZigZags=1 
+-s supportAreaSmoothing=600 
+-s supportMinimalAreaSqrt=1000 
+-s supportTowerDiameter=2000 
+-s supportTowerRoofAngle=65 
+-s areaSupportPolyGenerator=1 
+-s filamentDiameter=1128 
+-s fanFullOnLayerNr=2 
+-s extruderOffset1.X=18000 
+-s extruderOffset1.Y=0 
+-s endCode=M25 
+-s minimalExtrusionBeforeRetraction=20 
+-s retractionMinimalDistance=1500 
+-s objectSink=0 
+-s retractionAmount=4500 
+-s skinSpeed=25 
+-s skinPattern=SKIN_LINES 
+-s startCode=";FLAVOR:UltiGCode;TIME:14228901;MATERIAL:3058;MATERIAL2:0" 
+-s skirtDistance=0 
+-s skirtMinLength=150000 
+-s skirtLineCount=10 
+-s skirtSpeed=30 
+-s extruderOffset2.Y=0 
+-s extruderOffset2.X=0 
+-s fixHorrible=1 
+-s layer0extrusionWidth=400 
+-s moveSpeed=150 
+-s supportLineDistance=2666 
+-s retractionAmountExtruderSwitch=16500 
+-s sparseInfillLineDistance=2000 
+-s insetCount=2 
+-s downSkinCount=6 
+-s multiVolumeOverlap=150 
+-s position.X=115000 
+-s position.Y=112500 
+-s position.Z=0 
+-s infillPattern=INFILL_ZIGZAG 
+-s extruderNr=0 
+-s avoidOverlappingPerimeters=1
+

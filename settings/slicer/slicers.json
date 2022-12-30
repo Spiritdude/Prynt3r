@@ -1,0 +1,157 @@
+{
+   "cura" : {
+      "exe" : "CuraEngine",
+      "formats" : {
+         "stl" : 1
+      }
+   },
+   "cura-legacy" : {
+      "exe" : "CuraEngineLegacy",
+      "formats" : {
+         "stl" : 1
+      }
+   },
+   "cura4" : {
+      "exe" : "CuraEngine4",
+      "formats" : {
+         "stl" : 1
+      }
+   },
+   "cura5" : {
+      "exe" : "CuraEngine5",
+      "formats" : {
+         "stl" : 1
+      }
+   },
+   "curax" : {
+      "exe" : "CuraEngineX",
+      "formats" : {
+         "stl" : 1,
+         "obj" : 1,
+         "off" : 1
+      }
+   },
+   "prusa" : {
+      "exe" : "prusa-slicer",
+      "formats" : {
+         "obj" : 1,
+         "3mf" : 1,
+         "amf" : 1,
+         "stl" : 1
+      }
+   },
+   "slic3r" : {
+      "exe" : "slic3r",
+      "formats" : {
+         "obj" : 1,
+         "amf" : 1,
+         "stl" : 1
+      }
+   },
+   "slic3r-pe" : {
+      "exe" : "slic3r-prusa3d",
+      "formats" : {
+         "obj" : 1,
+         "amf" : 1,
+         "stl" : 1
+      }
+   },
+   "slicer4rtn": {
+      "exe" : "slicer4rtn",
+      "format": {
+         "stl": 1
+      }
+   },
+   "cura-slicer" : {
+      "exe" : "cura-slicer",
+      "formats" : {
+         "stl" : 1
+      }
+   },
+   "super": {
+      "exe": "superslicer",
+      "formats": {
+         "obj" : 1,
+         "3mf" : 1,
+         "amf" : 1,
+         "stl" : 1
+      }
+   },
+   "mandoline" : {
+      "exe" : "mandoline",
+      "formats" : {
+         "stl" : 1
+      }
+   },
+   "5dmaker": {
+      "exe": "5dmaker",
+      "formats": {
+         "stl": 1,
+         "5mf": 1
+      }
+   },
+   "kirimoto": {
+      "exe": "kirimoto-slicer",
+      "formats": {
+         "stl": 1
+      }
+   },
+   "zplus": {
+      "exe": "zplus-slicer",
+      "formats": {
+         "stl": 1
+      }
+   },
+   "lab": {
+      "exe": "lab-slicer",
+      "formats": {
+         "stl": 1,
+         "obj": 1,
+         "3mj": 1,
+         "3mf": 1
+      }
+   },
+   "vox3l": {
+      "exe": "vox3l-slicer",
+      "formats": {
+         "stl": 1,
+         "obj": 1,
+         "3mj": 1,
+         "3mf": 1
+      }
+   },
+   "voxgl": {
+      "exe": "voxgl-slicer",
+      "formats": {
+         "stl": 1,
+         "off": 1,
+         "3mj": 1,
+         "3mf": 1
+      },
+      "stdout": 1
+   },
+   "metatron": {
+      "exe": "metatron-slicer",
+      "formats": {
+         "stl": 1,
+         "off": 1,
+         "3mj": 1,
+         "3mf": 1
+      }
+   },
+   "enoch": {
+      "exe": "enoch-slicer",
+      "formats": {
+         "stl": 1,
+         "off": 1,
+         "3mj": 1,
+         "3mf": 1
+      }
+   },
+   "goslice": {
+      "exe": "goslice",
+      "formats": {
+         "stl": 1
+      }
+   }
+}
