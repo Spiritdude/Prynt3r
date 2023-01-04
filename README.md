@@ -1,6 +1,6 @@
 # Prynt3r
 
-Prynt3r is a Python rewrite and reimplementation of Print3r (Perl), its main features are
+Prynt3r is a Python rewrite and reimplementation of [Print3r](https://github.com/Spiritdude/Print3r) (Perl), its main features are
 - command line interface
 - multiple slicers supported (slic3r, prusa, super, cura, etc)
 - slice or print various formats: stl, obj, 3mf, and also .scad, .zcad, .jscad
