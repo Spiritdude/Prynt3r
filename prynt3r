@@ -1248,12 +1248,3 @@ else:
    usage()
 
 clean_exit()
-   
-if 'version' in conf:
-   print(f"{APPNAME} {VERSION}")
-   sys.exit(0)
-
-if len(fs)==0:
-   usage()
-
-   
