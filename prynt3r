@@ -15,6 +15,7 @@
 #  4) executing map.ini /usr/share/prynt3r/slicer/<slicer>/ on base.ini (slicer:slicing)
 #
 # History:
+# 2023/01/03: 0.0.5: maturing reliability, update, remote printing, log query, prepend_gcode added
 # 2022/12/30: 0.0.3: macros work as well, fine-tuning remote printing
 # 2022/12/28: 0.0.2: mostly functional, slicers work: slic3r, prusa, cura5, cura-slicer, lab, voxgl, vox3l (not yet super, kirimoto, mandoline, goslice, enoch, metatron, 5dmaker, zplus)
 # 2022/12/19: 0.0.1: cli args parsed, early .ini parsing without conditional variables, local and remote printer access works
@@ -25,7 +26,7 @@ import trimesh
 import perl5
 
 APPNAME = "Prynt3r"
-VERSION = "0.0.3"
+VERSION = "0.0.5"
 APPREPO = f"https://github.com/Spiritdude/{APPNAME}"
 
 me = os.path.basename(sys.argv.pop(0))
@@ -52,7 +53,9 @@ conf = {
    'gcode_viewer': 'yagv',
    'recenter': 1,
    'relevel': 1,
+   'display_update': 1,
    'placement': 'center',
+   'gcode_info': 'head',
    'keep': 0,
    'quiet': 0
 }
@@ -70,7 +73,7 @@ slicing = {
 }
 
 intern_keys = { k: 1 for k in conf } | { 
-   k: 1 for k in 'placement rotate scale multiply_part scad zcad jscad'.split(' ') 
+   k: 1 for k in 'placement rotate scale multiply_part scad scadlib zcad jscad'.split(' ') 
 }   
 slicer = { }
 
@@ -121,29 +124,31 @@ def usage():
       --rotate=<x>,<y>,<z> rotate model(s)
       --scale=<f>          scale model(s) uniformly
       --scale=<x>,<y>,<z>  scale model(s), if value has 'mm' appended, then axis is set absolute
-                              e.g. "0,0,20mm" scales model(s) to 20mm Z height
+                              e.g. "0,0,20mm" scales model(s) to 20mm Z height, all axes with 0 scales 
+                              proportionally
 
       --multiply-part=<n>  multiply model(s)
 
-      --recenter=<s>       recenter models (default: {conf['recenter']})
-      --relevel=<s>        relevel models (default: {conf['relevel']})
+      --recenter=<s>       recenter models (default: {conf['recenter']}), recommended when rotating
+      --relevel=<s>        relevel models (default: {conf['relevel']}), recommended when rotating
 
       --uid=<uid>          set uid for print process (otherwise unique will be generated)
       --keep               keep all temporary files (for debugging)
       
       --scad               treat arguments as OpenSCAD code, e.g. --scad 'cube(20)'
+         --scadlib=<lib>[,<lib2>]   consider libraries as well, e.g. --scadlib=parts.scad
       --zcad               treat arguments as OpenZCAD code
       --jscad              treat arguments as OpenJSCAD code
       
-
    slicing options (slicer independent):""")
    for k,v in slicing.items():
       k_ = re.sub('_','-',k)
-      print(f"      --{k_}=<v>{' '*(20-len(k_))} set {k_} (default: {json.dumps(v)})")
+      ks = re.sub('_',' ',k)
+      print(f"      --{k_}=<v>{' '*(20-len(k_))} set {ks} (default: {json.dumps(v)})")
    print(f"""
-      
    examples:
       {me} print cube.stl
+      {me} print cube.scad
       {me} -p prusa-i3 print --scad 'cube(20)'
       {me} -p ashtar-k-1 -s cura5 slice cube.stl
       {me} -p ashtar-k-1 -s cura5 print cube.stl -d tcp:192.168.1.32:0
@@ -187,13 +192,16 @@ def parse_ini(f):
       if re.search('^\s*#',l):
          continue
       m = [ ]
-      if preg_match('^([\w\-]+)\s*=\s*(\S*.*)',l,m):
+      if preg_match('^([\w\-]+)\s*=\s*(.*)',l,m):
          k,v = m[1],m[2]
          k = re.sub('-','_',k)
+         v = re.sub('^\s*','',v)
          v = re.sub('^\s*"([^"]*)"\s*$',lambda m: m.group(1),v)     # -- remove "" if entire line
          c[k] = v
       elif preg_match('^\s{3,}(\S.*)',l,m):
-         c[k] += "\n" + m[1]
+         v = m[1]
+         v = re.sub('^\s*"([^"]*)"\s*$',lambda m: m.group(1),v)     # -- remove "" if entire line
+         c[k] += "\n" + v
       elif len(l):
          lprint(f"WARN: '{f}': strange line to parse: '{l}'",level=0)
    return c
@@ -224,12 +232,12 @@ def remap(s,c):
       a = a.groups()
       k = a[0]
       lprint(f"var-repl: {k}",level=3)
-      if k in conf:
-         return conf[k]
-      elif k in c:
+      if k in s:
+         return s[k]
+      if k in c:
          return c[k]
       else:
-         lprint(f"WARN: variable <{k}> referenced but not defined",level=0)
+         eprint(f"variable <{k}> referenced but not defined")
       return str(0)
       
    lprint(f"mapping: {c}",level=3)
@@ -280,12 +288,10 @@ def sliceMesh(f,fo,ms):
       for k,v in parse_ini(os.path.join("/usr/share/prynt3r/slicer/",conf['slicer'],"base.ini")).items():
          if k not in slicing:
             slicing[k] = v
+      
       remap(slicing,parse_ini(os.path.join("/usr/share/prynt3r/slicer/",conf['slicer'],"map.ini")))
 
       for k,v in slicing.items():
-         if not k in intern_keys:
-            cmd.extend(['-s',f"{k}={str(v)}"])
-      for k,v in conf.items():
          if not k in intern_keys:
             cmd.extend(['-s',f"{k}={str(v)}"])
       if type(f)==list or type(f)==tuple:
@@ -314,6 +320,7 @@ def sliceMesh(f,fo,ms):
       for k,v in parse_ini(os.path.join("/usr/share/prynt3r/slicer/",conf['slicer'],"base.ini")).items():
          if k not in slicing:
             slicing[k] = v
+      
       remap(slicing,parse_ini(os.path.join("/usr/share/prynt3r/slicer/",conf['slicer'],"map.ini")))
 
       if conf['slicer'] in [ 'slic3r', 'prusa', 'super' ]:        
@@ -334,7 +341,7 @@ def sliceMesh(f,fo,ms):
 
       if 'placement' in conf:
          for k in "machine_width,machine_depth,machine_height".split(","):
-            slicing[k] = int(slicing[k])
+            slicing[k] = float(slicing[k])
          mm = ms.bounds
          sz = mm[1]-mm[0]
          if conf['placement']!='none':
@@ -360,8 +367,27 @@ def sliceMesh(f,fo,ms):
       p = execx(cmd)
       
    if not os.path.exists(fo) or os.path.getsize(fo)==0:
-      eprint(f"slicer produced no G-code: {p}")
+      eprint(f"slicer produced no G-code: {p}",exit=1)
 
+   if 'gcode_info' in conf and conf['gcode_info'] in ['head','tail']:
+      if conf['gcode_info'] == 'head':
+         fo2 = tmpfn("gcode")
+      else:
+         fo2 = fo
+      with open(fo2,"a") as fh:
+         for l in banner.split("\n"):
+            print(f"; {l}",file=fh)
+         print(f"; created {datetime.datetime.now().isoformat()}",file=fh)
+         for k,v in slicing.items():
+            print(f";   {k} = {json.dumps(v)}",file=fh)
+         if conf['gcode_info'] == 'head':
+            with open(fo,"r") as fh2:
+               fh.write(fh2.read())                   # -- FIXME: not sure if this is most efficient
+            fh.close()
+            os.rename(fo2,fo)
+         else:
+            fh.close()
+      
 def previewGcode(f):
    if not os.path.exists(f):
       eprint(f"cannot preview file <{f}> as it doesn't exist, ignored")
@@ -458,8 +484,9 @@ def connectSerial(d):
       eprint(f"device {d} doesn't exist, abort",exit=1)
 
    lprint(f"opening serial <{d}>")   
-   ser = serial.Serial(d,rtscts=True,dsrdtr=True,timeout=0.05)
-   #ser = serial.Serial(d,timeout=0.05)
+   #ser = serial.Serial(d,rtscts=True,dsrdtr=True,timeout=0.05)  # -- stutters
+   ser = serial.Serial(d,rtscts=True,timeout=0)     
+   #ser = serial.Serial(d,timeout=0.05)                  # -- stutters
    
    time.sleep(2)                          # -- allow older/slower 8-bit boards to get ready
 
@@ -497,12 +524,15 @@ def printGcode(f):
    em = 'abs'
    eabs = 0
    le = 0
+   tool = 0
    
-   
-   def ftime(d):
+   def ftime(d,short=0):
+      sp = ' '
+      if short:
+         sp = ''
       if d<2*60:
-         return f"{int(d/60)}m {int(d)%60:02d}s"
-      return f"{int(d/60/60)}h {int(d/60)%60:02d}m"
+         return f"{int(d/60)}m{sp}{int(d)%60:02d}s"
+      return f"{int(d/60/60)}h{sp}{int(d/60)%60:02d}m"
          
    def parse(l):
       m = [ ]
@@ -520,6 +550,8 @@ def printGcode(f):
          else:
             eabs += e
          le = e
+      elif preg_match('^T(\d+)',l,m):
+         tool = graceful(int,m[1],on_error=0)
       elif preg_match('^M82\s',l,m):   # -- E abs
          em = 'abs'
       elif preg_match('^M83\s',l,m):   # -- E rel
@@ -532,7 +564,7 @@ def printGcode(f):
    stu = st
 
    def update():
-      nonlocal stu
+      nonlocal stu, n_ok, tool
       if conf['verbose'] or conf['quiet'] or time.time()-stu < 1/5:
          return
       stu = time.time()
@@ -543,7 +575,10 @@ def printGcode(f):
          eta = max((st + tot) - time.time(),0)     # -- don't go below 0
       # output something like 'print3r: print: 0h 55m elapsed, eta 0h 00m, 100.0% complete, z=39.85mm, layer #89, filament 8.44m'
       print(f"{me}: print: {ftime(time.time()-st)} elapsed, eta {ftime(eta)}, {fcur/flen*100:.1f}% complete, z={cur_z:.2f}, layer #{lyn}, filament {eabs/1000:.3f}m   \r",end="",flush=True)
-
+      if conf['display_update']:
+         writeSerial(ser,f"M117 {fcur/flen*100:.0f}% ETA {ftime(eta,short=1)} L{lyn} T{tool}\n")
+         n_ok += 1
+         
    def gcode(l):
       l = re.sub(';.*','',l)
       g = { }
@@ -556,6 +591,8 @@ def printGcode(f):
    def abort_print(*args):
       writeSerial(ser,slicing['abort_gcode'])
       time.sleep(2)                                # -- give it some time before we sever connection
+      if conf['verbose']==0 and not conf['quiet']:
+         print("")
       clean_exit()
       
    ser = connectSerial(conf['device'])
@@ -580,7 +617,7 @@ def printGcode(f):
    signal.signal(signal.SIGINT,abort_print)        # -- reassign SIGINT, so we can send optional abort-gcode
 
    n_ok = 0
-   n_queue = 3
+   n_queue = 0
    
    while ser.isOpen():
       l = fh.readline()
@@ -591,40 +628,34 @@ def printGcode(f):
       update()
       if re.search('^\s*;',l):         # -- don't send plain comments
          continue
-      l = re.sub('^\s+','',l)
+      l = re.sub('^\s+','',l)          # -- remove leading spaces
       if len(l)<=0:
          continue
       lprint(f"=> {json.dumps(l)}",level=2)
       ser.write(l.encode())
-      if re.search('^G',l):            # -- count each G* expecting in 'ok\n'
-         n_ok += 1
+      n_ok += 1
       r = ''
-      while 1: #ser.inWaiting():
-         _ = ser.read(255)
-         if len(_)>0:
-            r += _.decode()                       # -- FIXME: here some runtime error could occur, if this happens, something terrible happened (bad cable, bad connection, out of sync systems etc), not sure if and how to recover
-            if len(_)<255:
-               lprint(f"   <= {json.dumps(r)}",level=2)
-               if 1:    # -- NOTE: 8/32bit boards with Marlin require stricter communication (awaiting OK for G* commands, otherwise queue overflows and commands are dropped)
-                  n_ok -= r.count('ok\n')
-                  if n_ok<=0:                     # -- we might fall below 0 as some M* commands also respons with 'ok\n'
+      while 1:
+         if ser.inWaiting():
+            _ = ser.read(256)
+            if len(_)>0:                                # -- read anything?
+               r += _.decode()                          # -- FIXME: here some runtime error could occur, if this happens, something terrible happened (bad cable, bad connection, out of sync systems etc), not sure if and how to recover
+               if len(_)<256:                           # -- complete read?
+                  lprint(f"   <= {json.dumps(r)}",level=2)
+                  n_ok -= r.count('ok\n') + r.count('ok ')
+                  if n_ok<=n_queue:                     # -- we might fall below 0, either way we move on to next g-code line
                      n_ok = 0
-                  if n_ok >= n_queue and fh.tell()<flen:    # -- we allow n_queue 'ok\n's to wait for, but only wait if we haven't reached end of file
-                  #if re.search('^G',l):
-                     pass
-                     #if re.search('ok\n',r):      # -- wait for 'ok' for G*
-                     #   break
-                  else:                           # -- all others we don't await 'ok' (like M* commands)
                      break
-               else:
-                  break
-         time.sleep(.001) 
+         time.sleep(.005) 
          lprint(f"   waiting for response (n_ok={n_ok})",level=4)
          
       if time.time()-lst > 3:
          deviceLock(conf['device'],update=1)
          lst = time.time()
          
+   if conf['display_update']:
+      writeSerial(ser,f"M117 print finished {ftime(time.time()-st,short=1)}\n")
+      
    time.sleep(5)                            # -- allow print to end before close the connection
    ser.close()   
    
@@ -655,6 +686,22 @@ def printGcode(f):
 def convertToMesh(f,fo):
    m = [ ]
    if preg_match('\.(scad)$',f,m):
+      if 'scadlib' in conf:
+         if not os.path.exists(conf['scadlib']):
+            eprint(f"scadlib <{conf['scadlib']}> not found, abort",exit=1)
+         fx = tmpfn('scad')
+         with open(fx,"w") as fh:
+            for l in conf['scadlib'].split(','):
+               if not re.search('^/',l):
+                  l = os.path.abspath(l)
+               print(f"use <{l}>",file=fh)
+            if 1:              
+               print(f"import \"{os.path.abspath(f)}\";",file=fh)    # -- simpler
+            else:
+               with open(f,"r") as fh2:
+                  print(fh2.read(),file=fh)
+         f = fx
+         tmp.append(fx)
       execx(['openscad','-o',fo,f])
    elif preg_match('\.(jscad)$',f,m):
       execx(['openjscad','-o',fo,f])
@@ -674,6 +721,22 @@ def execx(a,**argv):
             eprint(l)
       
    return p.returncode
+
+def nstr(*args,sep=','):                  # -- nicer str() without [ ] for list or tuple
+   s = ''
+   for i,a in enumerate(args):
+      if i>0:
+         s += sep
+      if type(a)==list or type(a)==tuple:
+         s += sep.join([nstr(_) for _ in a])
+      elif type(a)==dict:
+         for k,v in a.items():
+            s += f"{k}: {nstr(v)}" 
+      elif type(a)==str:
+         s += a
+      else:
+         s += f"{float(a):.2f}"
+   return s   
 
 def graceful(*args,**argv):               # -- graceful calling function, optional on_error with default value in case of error
    args = list(args)
@@ -786,12 +849,11 @@ if len(fs):
 
 if len(fs):
    cmd = fs.pop(0)
-else:
-   if len(fs) and os.path.exists(fs[0]):
-      iprint("WARN: no command given, 'print' assumed")
-      cmd = 'print'
+elif len(fs) and os.path.exists(fs[0]):
+   iprint("WARN: no command given, 'print' assumed")
+   cmd = 'print'
 
-if cmd in ['slice','preview','print']:
+if 1:
    fh = mopen(os.path.join("slicer","slicers.json"),"r")
    if fh:
       slicer = json.load(fh)
@@ -799,6 +861,8 @@ if cmd in ['slice','preview','print']:
    else:
       eprint(f"no <{os.path.join('slicer','slicers.json')}> found anywhere: {basedirs}")
    
+#if cmd in ['slice','preview','print','gconsole']:
+if cmd not in ['client','log']:
    for f in ipaths(os.path.join("printer","default.ini")):     # -- base for all settings (slicer/printer independent)
       for k,v in parse_ini(f).items():
          if k in conf_src: 
@@ -817,20 +881,26 @@ if cmd in ['slice','preview','print']:
          eprint(f"no printer config/profile found anywhere for <{conf['printer']}>")
          
    if 1:
+      if 'prepend_gcode' in conf:
+         conf['start_gcode'] += "\n"+conf['prepend_gcode']
+
       for k in conf:                                              # -- transfer conf into slicing
          if k not in intern_keys:
             slicing[k] = conf[k]
-   
+
    if conf['verbose']:
       lprint("conf:",json.dumps(conf,indent=3))
       lprint("slicing:",json.dumps(slicing,indent=3))
    
    for k in "machine_width,machine_depth,machine_height".split(","):
-      slicing[k] = int(slicing[k])
+      slicing[k] = float(slicing[k])
 
 if cmd=='slice' or cmd=='preview' or cmd=='print':
    iprint(f"conf: \"{slicing['machine_name']}\" ({conf['printer']}), device: {conf['device']}, build/v: {slicing['machine_width']}x{slicing['machine_depth']}x{slicing['machine_height']}, layer/h: {slicing['layer_height']}, nozzle/d: {slicing['nozzle_diameter']}")
 
+   for k in "webcam".split(","):
+      lprint(f"WARN: {k} not yet supported, coming soon",level=0)
+   
    fsm = [ ]    # -- meshs
    fsg = [ ]    # -- gcode
 
@@ -884,7 +954,7 @@ if cmd=='slice' or cmd=='preview' or cmd=='print':
          ext = m[1]
 
          if ext in preproc:
-            fm = re.sub('\.(\w+)$',preproc[ext],f)
+            fm = re.sub('\.(\w+)$',"."+preproc[ext],f)
             convertToMesh(f,fm)
             tmp.append(fm)
             f = fm
@@ -900,7 +970,7 @@ if cmd=='slice' or cmd=='preview' or cmd=='print':
             # -- recenter X,Y and level Z 
             if conf['placement']!= 'none' and (('recenter' in conf and conf['recenter']) or ('relevel' in conf and conf['relevel'])):
                tr = [(mm[0][j]-mm[1][j])/2 for j in range(3)]
-               pprint(f"translate <{tr}>")
+               pprint(f"reposition <{nstr(tr)}>")
                m.apply_translation(tr)
    
             if 'rotate' in conf:
@@ -908,7 +978,7 @@ if cmd=='slice' or cmd=='preview' or cmd=='print':
                   rt = [ float(f)/180*math.pi for f in conf['rotate'].split(',') ]
                else:
                   eprint(f"bad rotation <{conf['rotate']}>, should be <xr>,<yr>,<zr> like 90,0,0")
-               pprint(f"rotate <{[a/math.pi*180 for a in rt]}>")
+               pprint(f"rotate <{nstr([a/math.pi*180 for a in rt])}>")
                if rt[0]:
                   m.apply_transform(trimesh.transformations.rotation_matrix(rt[0],[1,0,0]))
                if rt[1]:
@@ -933,7 +1003,7 @@ if cmd=='slice' or cmd=='preview' or cmd=='print':
                      sc = [ sc[abs] if f==0 else f for i,f in enumerate(sc) ]    # -- any axis with scale = 0 => scale same as abs axis
                else:
                   sc = [float(conf['scale']) for i in range(3) ]
-               pprint(f"scale <{sc}>")
+               pprint(f"scale <{nstr(sc)}>")
                m.apply_scale(sc)
 
             if 'relevel' in conf and conf['relevel']:
@@ -942,11 +1012,17 @@ if cmd=='slice' or cmd=='preview' or cmd=='print':
                m.apply_translation([0,0,-mm[0][2]])
 
             place_mesh(m)
+
+            if 'translate' in conf:
+               v = [ float(a) for a in conf['translate'].split(',') ]
+               pprint(f"translate <{nstr(v)}>")
+               m.apply_translation(v)
+               
+            pprint(f"size {nstr(list(m.bounds[1]-m.bounds[0]),sep='x')}")
             
             fmt = list(slicer[conf['slicer']]['formats'].keys())[0]  # -- prefered format
             fm = tmpfn(fmt)
             tmp.append(fm)
-
             lprint(f"mesh {list(m.bounds[1]-m.bounds[0])}: {[list(v) for v in list(m.bounds)]}")
 
             lprint(f"export to <{fm}>")
@@ -1109,9 +1185,9 @@ elif cmd == 'log':
             if n==catch:
                h = 1
          else:
-            ll = l.lower()
+            l_ = l.lower()
             for f in fs:
-               if ll.find(f)>=0:
+               if l_.find(f.lower())>=0:
                   h += 1
             if h == len(fs):
                h = 1
@@ -1167,7 +1243,8 @@ elif cmd == 'client':
    clean_exit()
       
 else:
-   eprint(f"unknown command <{cmd}>: only print, slice, preview, log or client available")
+   if len(cmd):
+      eprint(f"unknown command <{cmd}>: only print, slice, preview, log or client available")
    usage()
 
 clean_exit()
