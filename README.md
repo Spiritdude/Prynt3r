@@ -6,6 +6,9 @@ Prynt3r is a Python rewrite and reimplementation of Print3r (Perl), its main fea
 - slice or print various formats: stl, obj, 3mf, and also .scad, .zcad, .jscad
 - print remotely via tcp (compatible with print3r)
 
+## Supported Platforms
+- Linux: Debian/Ubuntu 20.04 LTS / 22.04
+
 ## Download
 ```
 git clone https://github.com/Spiritdude/Prynt3r
