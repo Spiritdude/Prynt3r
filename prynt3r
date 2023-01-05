@@ -9,12 +9,17 @@
 #  It provides a slicer agnostic CLI to slice, preview, print local and remote.
 #
 # Topology of Settings:
-#  1) cli (universal:conf)
-#  2) printer profile ~/.config/prynt3r/printer/<printer>.ini (universal:conf)
-#  3) slicer base.ini /usr/share/prynt3r/slicer/<slicer>/ (slicer:slicing)
-#  4) executing map.ini /usr/share/prynt3r/slicer/<slicer>/ on base.ini (slicer:slicing)
+#
+#     cli args       printer/<printer>.ini  slicer/<slicer>/base.ini 
+#            \               +                     +
+#   conf{}:   +----+          \                     \
+#                   \          \                     \
+#   slicing{}:       +----------+---------------------+---x-------------- slicer-exe -> gcode
+#                                                        /
+#                                            slicer/<slicer>/map.ini
 #
 # History:
+# 2023/01/05: 0.0.6: experimental vdb import capability, more refined usage message
 # 2023/01/03: 0.0.5: maturing reliability, update, remote printing, log query, prepend_gcode added
 # 2022/12/30: 0.0.3: macros work as well, fine-tuning remote printing
 # 2022/12/28: 0.0.2: mostly functional, slicers work: slic3r, prusa, cura5, cura-slicer, lab, voxgl, vox3l (not yet super, kirimoto, mandoline, goslice, enoch, metatron, 5dmaker, zplus)
@@ -26,7 +31,7 @@ import trimesh
 import perl5
 
 APPNAME = "Prynt3r"
-VERSION = "0.0.5"
+VERSION = "0.0.6"
 APPREPO = f"https://github.com/Spiritdude/{APPNAME}"
 
 me = os.path.basename(sys.argv.pop(0))
@@ -34,7 +39,7 @@ me = os.path.basename(sys.argv.pop(0))
 tmp = [ ]
 
 basedirs = [ "/usr/share/prynt3r", os.path.join(os.getenv('HOME'),".config/prynt3r") ]
-
+ 
 banner = f"""          ____    .              __ _____         .
      *   / __ \_______* ______  / /|__  /_____                 *
         / /_/ / ___/ / / / __ \/ __//_ </ ___/  .         |             *
@@ -97,7 +102,10 @@ def usage():
       gconsole             starts interactive g-code console
       log [<s>] [#<n>]     list log, query term <s> or list log entry '#<n>'
       client               start client process, so remote {me} can access it
-      
+""")
+   print("   file-formats:")
+   print(f"      stl, obj, off, 3mf, ply, {', '.join(list(preproc.keys()))}")
+   print(f"""
    options:
       --help               print this message
       --version            print version and exit
@@ -138,8 +146,12 @@ def usage():
       --scad               treat arguments as OpenSCAD code, e.g. --scad 'cube(20)'
          --scadlib=<lib>[,<lib2>]   consider libraries as well, e.g. --scadlib=parts.scad
       --zcad               treat arguments as OpenZCAD code
-      --jscad              treat arguments as OpenJSCAD code
-      
+      --jscad              treat arguments as OpenJSCAD code""")
+
+   #for l in inline_code:        # -- above is more informative than machine generated
+   #   print(f"      --{l:<18} treat argument as {l}-code, e.g. --{l} '{l} code'")
+
+   print(f"""
    slicing options (slicer independent):""")
    for k,v in slicing.items():
       k_ = re.sub('_','-',k)
@@ -150,8 +162,8 @@ def usage():
       {me} print cube.stl
       {me} print cube.scad
       {me} -p prusa-i3 print --scad 'cube(20)'
-      {me} -p ashtar-k-1 -s cura5 slice cube.stl
-      {me} -p ashtar-k-1 -s cura5 print cube.stl -d tcp:192.168.1.32:0
+      {me} -p ashtar-k-1 -s cura5 slice cube.3mf
+      {me} -p ashtar-k-1 -s cura5 print structure.vdb -d tcp:192.168.1.32:0
       {me} -s prusa slice cube.stl -o a.gcode 
       {me} preview cube.stl 
       {me} log 
@@ -707,6 +719,25 @@ def convertToMesh(f,fo):
       execx(['openjscad','-o',fo,f])
    elif preg_match('\.(zcad)$',f,m):
       execx(['openzcad','-o',fo,f])
+   elif preg_match('\.(vdb)$',f,m):
+      try:
+         import pyopenvdb as vdb
+         def triangulate(v,a=0.5):
+            m = { "faces": [ ], "vertices": [ ] }
+            p, ts, qs = v.convertToPolygons(adaptivity=a)
+            m['vertices'] = p.tolist()
+            m['faces'] = [ t.tolist()[::-1] for t in ts ]
+            for q in qs:
+               m['faces'].append([q[2],q[1],q[0]])
+               m['faces'].append([q[3],q[2],q[0]])
+            return m
+      
+         gs,meta = vdb.readAll(f)
+         m = triangulate(gs[0])
+         ms = trimesh.Trimesh(vertices=m['vertices'],faces=m['faces'])
+         ms.export(fo)
+      except Exception as e:
+         eprint(f"pyopenvdb not installed or available, or failed to load otherwise:",e,exit=1)
 
 def execx(a,**argv):
    lprint(f"exec {a}",level=2)
@@ -791,7 +822,8 @@ signal.signal(signal.SIGINT, clean_exit)
 
 s2l = { "o": "output", "p": "printer", "v": "verbose", "d": "device", "s": "slicer", "k": "keep", "x": "extended" }
 s2a = { "o": 1, "p": 1, "d": 1, "s": 1 }
-preproc = { "scad": "stl", "jscad": "stl", "zcad": "stl" }
+preproc = { "scad": "stl", "jscad": "stl", "zcad": "stl", "vdb": "obj" }
+inline_code = "scad,jscad,zcad".split(',')
 
 post = { }
 fs = [ ]
@@ -923,12 +955,12 @@ if cmd=='slice' or cmd=='preview' or cmd=='print':
    for i,f in enumerate(fs):
       pprint(f"processing <{f}>",start=True)
 
-      inline = [ e for e in conf if e in preproc ]
+      inline = [ e for e in conf if e in inline_code ]
 
       m = [ ]
       if len(inline):
          ext = inline[0]
-         pprint(f"converting {ext}: {f}")
+         pprint(f"converting inline {ext}: {f}")
 
          src = f
 
@@ -950,7 +982,7 @@ if cmd=='slice' or cmd=='preview' or cmd=='print':
       if preg_match('\.gcode$',f,m):
          fsg.append(f)
 
-      elif preg_match('\.(\w+)',f,m):
+      elif preg_match('\.(\w+)$',f,m):
          ext = m[1]
 
          if ext in preproc:
