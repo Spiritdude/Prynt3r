@@ -70,6 +70,7 @@ conf_src = { }
 
 slicing = { 
    'machine_name': "Unknown",
+   'machine_uuid': "",
    'machine_width': 200,
    'machine_depth': 200,
    'machine_height': 200,
@@ -536,7 +537,7 @@ def connectSerial(d):
 
    time.sleep(2)                          # -- allow older/slower 8-bit boards to get ready
 
-   if 'machine_uuid' in conf:           
+   if conf['machine_uuid'] != "":
       uid = None
       for ask in ["M115","M122"]:
          writeSerial(ser,ask+"\n")
@@ -642,7 +643,7 @@ def printGcode(f):
       import RepRapFirmwareAPI
       signal.signal(signal.SIGINT,abort_print)        # -- reassign SIGINT, so we can send optional abort-gcode
       rrf = RepRapFirmwareAPI.RRFRestAPI(m[1])
-      if conf['machine_uuid']:
+      if conf['machine_uuid']!="":
          r = rrf.gcode("M122")
          for id in ['Board ID:\s*(\S+)','MAC address\s*(\S+)']:
             if preg_match(id,r,m):   
