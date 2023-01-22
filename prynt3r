@@ -19,6 +19,8 @@
 #                                            slicer/<slicer>/map.ini
 #
 # History:
+# 2023/01/13: 0.0.8: adding .3mj support as well, and webcam support again (like print3r), early -d rrf:<ip> RepRapFirmware support
+# 2023/01/09: 0.0.7: support for svg (via openscad) added
 # 2023/01/05: 0.0.6: experimental vdb import capability, more refined usage message
 # 2023/01/03: 0.0.5: maturing reliability, update, remote printing, log query, prepend_gcode added
 # 2022/12/30: 0.0.3: macros work as well, fine-tuning remote printing
@@ -31,7 +33,7 @@ import trimesh
 import perl5
 
 APPNAME = "Prynt3r"
-VERSION = "0.0.6"
+VERSION = "0.0.8"
 APPREPO = f"https://github.com/Spiritdude/{APPNAME}"
 
 me = os.path.basename(sys.argv.pop(0))
@@ -51,7 +53,7 @@ banner = f"""          ____    .              __ _____         .
 
 conf = {
    'verbose': 0,
-   'printer': 'unknown',
+   'printer': 'default',
    'device': '/dev/ttyUSB0',
    'baudrate': 115200,
    'slicer': 'slic3r',
@@ -100,7 +102,7 @@ def usage():
       print <file1> ...    slice and send gcode to printer local or remote, e.g. define -d <dev> or --device=<dev>
       preview <file1> ...  slice file(s) into single gcode and launch gcode viewer
       gconsole             starts interactive g-code console
-      log [<s>] [#<n>]     list log, query term <s> or list log entry '#<n>'
+      log [<s>] [#<n>]     list log, query term <s> or list log entry '#<n>', with --output or -o you can list only particulars
       client               start client process, so remote {me} can access it
 """)
    print("   file-formats:")
@@ -126,6 +128,9 @@ def usage():
       --extended or -x     extended output, e.g. for 'log' command
       
       --quiet or -q        stay quiet, only output warnings or errors
+
+      --output=<fn>        slice: slicing into a particular file '{me} slice cube.stl -o test.gcode' or
+         -o <fn>              log: '{me} log -o uid,files,args' to list particular fields of the log file
       
       --placement=<loc>    set location: 'none', 'center', 'random' (default: none)
       
@@ -169,6 +174,7 @@ def usage():
       {me} log 
       {me} log cube.stl -v
       {me} log '#100' -xv
+      {me} log -o uid,args,files
       {me} -d /dev/ttyACM0 client &
       {me} -d /dev/ttyACM1 gconsole
       > M115
@@ -194,6 +200,9 @@ def clean_exit(*args,exit=0):
 
 def parse_ini(f):
    c = { }
+   if not os.path.exists(f):
+      eprint(f"file <{f}> doesn't exist, ignored")
+      return c
    if type(f)==str:
       lprint(f"process {f}")
       fh = open(f,"r")
@@ -262,8 +271,9 @@ def remap(s,c):
          lprint(f"  => '{v}'",level=3)
       if type(v)!=str:
          v = str(v)
-      v = re.sub('\$(\w+)',var_repl,v)                # -- replace all vars
-      v = re.sub('\{([^\}]*)\}',expr_repl,v)          # -- eval entire expression
+      v = re.sub('\$(\w+)',var_repl,v)                # -- replace all vars [1]: $a
+      v = re.sub('\$\{(\w+)\}',var_repl,v)            # -- replace all vars [2]: ${a}
+      v = re.sub('\{([^\}]*)\}',expr_repl,v)          # -- eval entire expression: { expr }
       v = re.sub('\\\\n','\n',v)
       lprint(f"=> {k}: '{v}'",level=3)
       s[k] = v
@@ -277,7 +287,7 @@ def sliceMesh(f,fo,ms):
             eprint(f"cannot slice mesh, file <{_}> doesn't exist, ignored")
          m = re.search('\.(\w+)$',_)
          ext = m[1]
-         if ext not in slicer[conf['slicer']]['formats'].keys():
+         if conf['slicer'] in slicer and ext not in slicer[conf['slicer']]['formats'].keys():
             eprint(f"slicer <{conf['slicer']}> does not support format '{ext}'",exit=1)
    else:
       if not os.path.exists(f):
@@ -289,7 +299,7 @@ def sliceMesh(f,fo,ms):
          eprint(f"slicer <{conf['slicer']}> does not support format '{ext}'",exit=1)
    
    if conf['slicer'] not in slicer:
-      lprint(f"WARN: {conf['slicer']} not officially supported, by trying anyway",level=0)
+      lprint(f"WARN: slicer <{conf['slicer']}> not officially supported, trying anyway",level=0)
       cmd = [conf['slicer'],'-o',fo]
 
    if conf['slicer'] in ['cura','cura4','cura5']:                 # -- covering all curas
@@ -314,7 +324,9 @@ def sliceMesh(f,fo,ms):
       p = execx(cmd)
 
    else:                                                          # -- all others
-      cmd = [slicer[conf['slicer']]['exe'],'-o',fo]
+      if conf['slicer'] in slicer:
+         cmd = [slicer[conf['slicer']]['exe'],'-o',fo]
+         
       if conf['slicer'] in [ 'slic3r', 'prusa', 'super' ]:
          cmd.append('--merge')                                    # -- merge multiple mesh(s)
          cmd.append('--before-layer-gcode=;LAYER:[layer_num]')    # -- make it cura-like gcode
@@ -448,6 +460,8 @@ def connectSerial(d):
 
    deviceLock(d,set=1)
 
+   backend = 'serial'
+
    if preg_match("^tcp:(\S+)",d,m):
       host = m[1]
       n = 0
@@ -492,14 +506,34 @@ def connectSerial(d):
             pass                         # -- file exists, we assume the socat is still running, let's reuse it
          d = sdev
    
-   if not os.path.exists(d):
-      eprint(f"device {d} doesn't exist, abort",exit=1)
+   if preg_match("^rrf:(\S+)",d,m):
+      host = m[1]
+      import RepRapFirmwareAPI
+      class RRFPseudoSerial(RepRapFirmwareAPI.RRFRestAPI):    
+         def __init__(self,host):
+            super().__init__(host)
+         def read(self,n=255):                                    # -- emulate non-blocking read
+            r = self.reply()
+            #print(f"{json.dumps(r)}")
+            if len(r)>0 and not re.search('\sok\n',r):
+               r += "ok\n"
+            #elif len(r)>0:
+            #   r += "\n"
+            return r.encode()
+         def write(self,c):
+            return self.gcode(c.decode(),"async")
+      ser = RRFPseudoSerial(host)
+      backend = 'rrf'
 
-   lprint(f"opening serial <{d}>")   
-   #ser = serial.Serial(d,rtscts=True,dsrdtr=True,timeout=0.05)  # -- stutters
-   ser = serial.Serial(d,rtscts=True,timeout=0)     
-   #ser = serial.Serial(d,timeout=0.05)                  # -- stutters
+   else:
+      if not os.path.exists(d):
+         eprint(f"device {d} doesn't exist, abort",exit=1)
    
+      lprint(f"opening serial <{d}>")   
+      #ser = serial.Serial(d,rtscts=True,dsrdtr=True,timeout=0.05)  # -- stutters
+      ser = serial.Serial(d,rtscts=True,timeout=0)     
+      #ser = serial.Serial(d,timeout=0.05)                  # -- stutters
+
    time.sleep(2)                          # -- allow older/slower 8-bit boards to get ready
 
    if 'machine_uuid' in conf:           
@@ -527,8 +561,16 @@ def printGcode(f):
    job = { }
    
    st = time.time()
+   stu = st
+
    job['start_time'] = st
    job['start_date'] = datetime.datetime.fromtimestamp(job['start_time']).isoformat()
+   
+   if not os.path.exists(f):
+      eprint(f"cannot read file <{f}> doesn't exist, ignored")
+      return
+         
+   flen = os.path.getsize(f)
    
    cur_z = 0               # -- current Z
    lyn = 0                 # -- layer number
@@ -545,7 +587,7 @@ def printGcode(f):
       if d<2*60:
          return f"{int(d/60)}m{sp}{int(d)%60:02d}s"
       return f"{int(d/60/60)}h{sp}{int(d/60)%60:02d}m"
-         
+            
    def parse(l):
       m = [ ]
       nonlocal lyn, cur_z, le, em, eabs
@@ -573,9 +615,7 @@ def printGcode(f):
       elif preg_match('^G91\s',l,m):   # -- rel pos (also E)
          em = 'rel'
 
-   stu = st
-
-   def update():
+   def update(fh):
       nonlocal stu, n_ok, tool
       if conf['verbose'] or conf['quiet'] or time.time()-stu < 1/5:
          return
@@ -590,89 +630,138 @@ def printGcode(f):
       if conf['display_update']:
          writeSerial(ser,f"M117 {fcur/flen*100:.0f}% ETA {ftime(eta,short=1)} L{lyn} T{tool}\n")
          n_ok += 1
-         
-   def gcode(l):
-      l = re.sub(';.*','',l)
-      g = { }
-      for kv in re.split('\s+',l):
-         m = [ ]
-         if preg_match('(\w)(.*)',kv,m):
-            g[m[1]] = m[2]
-      return g
 
-   def abort_print(*args):
-      writeSerial(ser,slicing['abort_gcode'])
-      time.sleep(2)                                # -- give it some time before we sever connection
-      if conf['verbose']==0 and not conf['quiet']:
-         print("")
-      clean_exit()
-      
-   ser = connectSerial(conf['device'])
-   
-   if not ser:
-      eprint(f"cannot open device <{conf['device']}>, abort")
-      return 
-
-   if not os.path.exists(f):
-      eprint(f"cannot read file <{f}> doesn't exist, ignored")
-      return
-      
-   flen = os.path.getsize(f)
-
-   fh = open(f,"r")
-   if not fh:
-      eprint(f"cannot read file <{f}>, abort file processing")
-      return 
-
-   lst = time.time()
-
-   signal.signal(signal.SIGINT,abort_print)        # -- reassign SIGINT, so we can send optional abort-gcode
-
-   n_ok = 0
-   n_queue = 0
-   
-   while ser.isOpen():
-      l = fh.readline()
-      g = gcode(l)
-      if not l:    
-         break
-      parse(l)
-      update()
-      if re.search('^\s*;',l):         # -- don't send plain comments
-         continue
-      l = re.sub('^\s+','',l)          # -- remove leading spaces
-      if len(l)<=0:
-         continue
-      lprint(f"=> {json.dumps(l)}",level=2)
-      ser.write(l.encode())
-      n_ok += 1
-      r = ''
+   m = [ ]
+   if preg_match('rrf:(\S+)',conf['device'],m):          # -- RRF/RepRapFirmware: upload file, print & delete file again
+      def abort_print(*args):
+         # -- actually send command to stop current print
+         rrf.gcode("M25")                                # -- pause SD printing
+         rrf.gcode("M0")                                 # -- cancel SD printing
+         rrf.delete("/gcodes/current.gcode")
+         clean_exit()
+      import RepRapFirmwareAPI
+      signal.signal(signal.SIGINT,abort_print)        # -- reassign SIGINT, so we can send optional abort-gcode
+      rrf = RepRapFirmwareAPI.RRFRestAPI(m[1])
+      if conf['machine_uuid']:
+         r = rrf.gcode("M122")
+         for id in ['Board ID:\s*(\S+)','MAC address\s*(\S+)']:
+            if preg_match(id,r,m):   
+               uid = m[1]
+               if uid == conf['machine_uuid']:
+                  iprint(f"authenticated \"{conf['machine_name']}\" ({conf['printer']}): {uid}")
+               else:
+                  eprint(f"printer not authenticated '{uid}' != '{conf['machine_uuid']}' ({conf['machine_name']})",exit=1)
+      rrf.upload(f,"/gcodes/current.gcode")           # -- uploading local file to current.gcode
+      rrf.print("/gcodes/current.gcode")              # -- start printing right away
+      conf['display_update'] = 0
+      fh = open(f,"r")                                # -- we read along as far we know the remote printing does it too
       while 1:
-         if ser.inWaiting():
-            _ = ser.read(256)
-            if len(_)>0:                                # -- read anything?
-               r += _.decode()                          # -- FIXME: here some runtime error could occur, if this happens, something terrible happened (bad cable, bad connection, out of sync systems etc), not sure if and how to recover
-               if len(_)<256:                           # -- complete read?
-                  lprint(f"   <= {json.dumps(r)}",level=2)
-                  n_ok -= r.count('ok\n') + r.count('ok ')
-                  if n_ok<=n_queue:                     # -- we might fall below 0, either way we move on to next g-code line
-                     n_ok = 0
-                     break
-         time.sleep(.005) 
-         lprint(f"   waiting for response (n_ok={n_ok})",level=4)
+         # -- e.g. "SD printing byte 7751/91503" or "Not SD printing"
+         s = rrf.print_status()
+         if preg_match("(\d+)\/(\d+)",s,m):
+            if not conf['quiet'] or conf['verbose']:
+               fcur = float(m[1])
+               lprint(f"cur={fcur} / len={flen}",level=2)
+               while fh.tell() < fcur:
+                  l = fh.readline()             # -- we read as many lines tracking the same as remote
+                  lprint(f"local {l}")
+                  parse(l)
+                  update(fh)
+         elif preg_match("^Not SD printing",s,m):
+            break
+         time.sleep(1)
+         webcamSnap()
+      if not conf['quiet'] or conf['verbose']:
+         print("")
+      rrf.delete("/gcodes/current.gcode")
          
-      if time.time()-lst > 3:
-         deviceLock(conf['device'],update=1)
-         lst = time.time()
+   else:
+      def gcode(l):
+         l = re.sub(';.*','',l)
+         g = { }
+         for kv in re.split('\s+',l):
+            m = [ ]
+            if preg_match('(\w)(.*)',kv,m):
+               g[m[1]] = m[2]
+         return g
+   
+      def abort_print(*args):
+         writeSerial(ser,slicing['abort_gcode'])
+         time.sleep(2)                                # -- give it some time before we sever connection
+         if conf['verbose']==0 and not conf['quiet']:
+            print("")
+         clean_exit()
          
-   if conf['display_update']:
-      writeSerial(ser,f"M117 print finished {ftime(time.time()-st,short=1)}\n")
+      ser = connectSerial(conf['device'])
       
-   time.sleep(5)                            # -- allow print to end before close the connection
-   ser.close()   
+      if not ser:
+         eprint(f"cannot open device <{conf['device']}>, abort")
+         return 
    
-   deviceLock(conf['device'],unset=1)
+      fh = open(f,"r")
+      if not fh:
+         eprint(f"cannot read file <{f}>, abort file processing")
+         return 
    
+      lst = time.time()
+   
+      signal.signal(signal.SIGINT,abort_print)        # -- reassign SIGINT, so we can send optional abort-gcode
+      
+      webcamSnap()
+   
+      n_ok = 0
+      n_queue = 0
+      
+      while ser.isOpen():
+         l = fh.readline()
+         g = gcode(l)
+         if not l:    
+            break
+         parse(l)
+         update(fh)
+         if re.search('^\s*;',l):         # -- don't send plain comments
+            continue
+         l = re.sub('^\s+','',l)          # -- remove leading spaces
+         if len(l)<=0:
+            continue
+         lprint(f"=> {json.dumps(l)}",level=2)
+         ser.write(l.encode())
+         n_ok += 1
+         r = ''
+         while 1:
+            if ser.inWaiting():
+               _ = ser.read(256)
+               if len(_)>0:                                # -- read anything?
+                  r += _.decode()                          # -- FIXME: here some runtime error could occur, if this happens, something terrible happened (bad cable, bad connection, out of sync systems etc), not sure if and how to recover
+                  if len(_)<256:                           # -- complete read?
+                     lprint(f"   <= {json.dumps(r)}",level=2)
+                     n_ok -= r.count('ok\n') + r.count('ok ')
+                     if n_ok<=n_queue:                     # -- we might fall below 0, either way we move on to next g-code line
+                        n_ok = 0
+                        break
+            time.sleep(.005) 
+            lprint(f"   waiting for response (n_ok={n_ok})",level=4)
+            
+         if time.time()-lst > 3:
+            deviceLock(conf['device'],update=1)
+            lst = time.time()
+         
+         webcamSnap()
+            
+      if conf['display_update']:
+         writeSerial(ser,f"M117 print finished {ftime(time.time()-st,short=1)}\n")
+         
+      time.sleep(5)                            # -- allow print to end before close the connection
+   
+      ser.close()   
+      
+      deviceLock(conf['device'],unset=1)
+      
+      if conf['verbose']==0 and not conf['quiet']:
+         print("")               # -- required to clear single line updates above with "\r"
+
+   webcamSnap(end=1)          # -- let's take last webcam snapshot(s) of finished print
+
    # -- let's document the print
    job['time'] = job['end_time'] = time.time()
    job['end_date'] = datetime.datetime.fromtimestamp(job['end_time']).isoformat()
@@ -680,6 +769,7 @@ def printGcode(f):
    job['uid'] = conf['uid'] if 'uid' in conf else str(uuid.uuid4())
    job['conf'] = conf
    job['slicing'] = slicing
+   job['process'] = process
    job['args'] = sys.argv
    job['files'] = fs
    job['size'] = os.path.getsize(f)
@@ -692,8 +782,6 @@ def printGcode(f):
    print(json.dumps(job),file=fhl)
    fhl.close()
    
-   if conf['verbose']==0 and not conf['quiet']:
-      print("")               # -- required to clear single line updates above with "\r"
    
 def convertToMesh(f,fo):
    m = [ ]
@@ -708,7 +796,7 @@ def convertToMesh(f,fo):
                   l = os.path.abspath(l)
                print(f"use <{l}>",file=fh)
             if 1:              
-               print(f"import \"{os.path.abspath(f)}\";",file=fh)    # -- simpler
+               print(f"include <{os.path.abspath(f)}>",file=fh)    # -- simpler
             else:
                with open(f,"r") as fh2:
                   print(fh2.read(),file=fh)
@@ -738,7 +826,16 @@ def convertToMesh(f,fo):
          ms.export(fo)
       except Exception as e:
          eprint(f"pyopenvdb not installed or available, or failed to load otherwise:",e,exit=1)
-
+   elif preg_match('\.(svg)$',f,m):
+      fx = tmpfn('scad')
+      with open(fx,"w") as fh:
+         print(f"linear_extrude(height=10) import(\"{os.path.abspath(f)}\");",file=fh)
+      f = fx
+      tmp.append(fx)
+      execx(['openscad','-o',fo,f])
+   else:
+      eprintf(f"unknown extension in <{f}>, don't know how to handle yet",exit=1)
+      
 def execx(a,**argv):
    lprint(f"exec {a}",level=2)
    p = subprocess.run(a,capture_output=True)
@@ -753,6 +850,102 @@ def execx(a,**argv):
       
    return p.returncode
 
+def webcamSnap(end=0):
+   if 'webcam' not in conf or len(conf['webcam'])==0:
+      return
+      
+   def webcam_conf(s):
+      c = { }
+      for w in re.split('\s+',s):
+         if len(w)==0: continue
+         for kv in re.split('[;,]',w):
+            k,v = kv.split(':')
+            if re.search('^[\d\.]+$',v):
+               v = float(v)
+            c[k] = v
+      if 'time' not in c: c['time'] = 60
+      if 'delay' not in c: c['delay'] = 5
+      if c['time'] <= c['delay']: c['time'] = c['delay']+1
+      return c
+
+   if 'webcam' not in process:
+      process['webcam'] = { }
+   if 'last' not in process['webcam']:
+      process['webcam']['last'] = 0
+   if 'snaps' not in process['webcam']:
+      process['webcam']['snaps'] = [ ]
+
+   dir = os.path.join(os.getenv('HOME'),'.prynt3r','snaps')
+   if not os.path.exists(dir):
+      os.makedirs(dir)
+      
+   wc = webcam_conf('')
+   if 'webcam_conf' in conf:
+      wc = webcam_conf(conf['webcam_conf'])
+   if 'webcam_snap' in conf:
+      wc = webcam_conf(conf['webcam_snap'])
+      
+   if end or process['webcam']['last'] + wc['time'] < time.time():
+      wcs = [ ]
+      if 'webcam_settings' in conf:
+         wcs = [ webcam_conf(a) for a in re.split('\s+',conf['webcam_settings']) ]
+      for i,w in enumerate(re.split('\s+',conf['webcam'])):
+         if len(w)==0: continue
+         if re.search('^/dev/',w) and not os.path.exists(w):      # -- remote webcams we can't probe for existence
+            lprint(f"webcam device <{w}> does not exist, ignored")
+            continue
+         wcb = wc.copy()
+         if i<len(wcs) and type(wcs[i])==dict:
+            wcb |= wcs[i]
+         fno = os.path.join(dir,f"{datetime.datetime.now().strftime('%Y%m%d %H%M%S')}")
+         nick = os.getpid()
+         if 'printer' in conf:
+            nick = conf['printer']
+         if 'machine_name' in conf:
+            nick = conf['machine_name']
+         nick = re.sub('[\W ]+','_',nick)
+         fno += " - "+nick
+         fno += "."+str(i)
+         fno += ".jpg"
+         lprint(f"take webcam snap #{i} to {fno} conf={json.dumps(wc)}")
+         if os.fork()==0:
+            #def nothing(): pass
+            #signal.signal(signal.SIGINT,nothing)
+            signal.signal(signal.SIGINT,sigint_orig)
+            # -- NOTE: -nostdin is essential, otherwise ffpmep tampers with parent's stdin/ioctl console
+            p = subprocess.run(['ffmpeg','-nostdin','-i',w,'-ss',str(wcb['delay']),'-r','1','-vsync','1','-qscale','1','-frames:v','1','-f','image2',fno],capture_output=True)     
+            if not os.path.exists(fno):
+               lprint(f"capture webcam <{w}> failed")
+               lprint(p,level=3)
+            else:
+               if 'rotate' in wcb:
+                  tf = tmpfn('jpg')
+                  subprocess.run(['convert',fno,'-rotate',str(wcb['rotate']),tf])
+                  os.rename(tf,fno)
+            sys.exit(0)
+         process['webcam']['snaps'].append(fno)
+      process['webcam']['last'] = time.time()
+
+   if end:
+      time.sleep(2)                          # -- allow last webcam to be taken (we already waited 5s before)
+      stats = { "total": 0, "exists": 0 }
+      for f in process['webcam']['snaps']:
+         if os.path.exists(f):
+            stats['exists'] += 1
+         stats['total'] += 1
+      if stats['total'] > 0 and stats['total']!=stats['exists']:
+         iprint(f"WARN: webcam: {stats['exists']} snapshots taken, out of {stats['total']} total requested or {100-100/stats['total']*stats['exists']:.0f}% missing")
+
+def loadMesh(fn):
+   if re.search('\.3mj$',fn):
+      with open(fn,"r") as fh:
+         e = json.load(fh)
+         fs = [ ]
+         for v in m['volumes']:
+            f.extend([ f['v'] for f in v['triangles'] ])
+         return trimesh.Trimesh(vertices=vertices.e['vertices'],faces=fs)
+   return trimesh.load(fn)
+   
 def nstr(*args,sep=','):                  # -- nicer str() without [ ] for list or tuple
    s = ''
    for i,a in enumerate(args):
@@ -822,10 +1015,11 @@ signal.signal(signal.SIGINT, clean_exit)
 
 s2l = { "o": "output", "p": "printer", "v": "verbose", "d": "device", "s": "slicer", "k": "keep", "x": "extended" }
 s2a = { "o": 1, "p": 1, "d": 1, "s": 1 }
-preproc = { "scad": "stl", "jscad": "stl", "zcad": "stl", "vdb": "obj" }
+preproc = { "scad": "stl", "jscad": "stl", "zcad": "stl", "vdb": "obj", "svg": "stl" }
 inline_code = "scad,jscad,zcad".split(',')
 
 post = { }
+process = { }
 fs = [ ]
 i = 0
 while i < len(sys.argv):
@@ -930,8 +1124,8 @@ if cmd not in ['client','log']:
 if cmd=='slice' or cmd=='preview' or cmd=='print':
    iprint(f"conf: \"{slicing['machine_name']}\" ({conf['printer']}), device: {conf['device']}, build/v: {slicing['machine_width']}x{slicing['machine_depth']}x{slicing['machine_height']}, layer/h: {slicing['layer_height']}, nozzle/d: {slicing['nozzle_diameter']}")
 
-   for k in "webcam".split(","):
-      lprint(f"WARN: {k} not yet supported, coming soon",level=0)
+   #for k in "webcam".split(","):
+   #   lprint(f"WARN: {k} not yet supported, coming soon",level=0)
    
    fsm = [ ]    # -- meshs
    fsg = [ ]    # -- gcode
@@ -995,7 +1189,7 @@ if cmd=='slice' or cmd=='preview' or cmd=='print':
          if conf['recenter'] or conf['relevel'] or 'rotate' in conf or 'scale' in conf: # or 'placement' in conf:
             pprint(f"prepare")
 
-            m = trimesh.load(f)
+            m = loadMesh(f)
             mm = m.bounds
             sz = [ mm[1][i]-mm[0][i] for i in range(3) ]
    
@@ -1040,7 +1234,7 @@ if cmd=='slice' or cmd=='preview' or cmd=='print':
 
             if 'relevel' in conf and conf['relevel']:
                mm = m.bounds
-               pprint(f"relevel",-mm[0][2])
+               pprint(f"relevel {-mm[0][2]:.3f}")
                m.apply_translation([0,0,-mm[0][2]])
 
             place_mesh(m)
@@ -1052,7 +1246,10 @@ if cmd=='slice' or cmd=='preview' or cmd=='print':
                
             pprint(f"size {nstr(list(m.bounds[1]-m.bounds[0]),sep='x')}")
             
-            fmt = list(slicer[conf['slicer']]['formats'].keys())[0]  # -- prefered format
+            if conf['slicer'] in slicer:
+               fmt = list(slicer[conf['slicer']]['formats'].keys())[0]  # -- prefered format
+            else:
+               fmt = 'stl'
             fm = tmpfn(fmt)
             tmp.append(fm)
             lprint(f"mesh {list(m.bounds[1]-m.bounds[0])}: {[list(v) for v in list(m.bounds)]}")
@@ -1088,7 +1285,7 @@ if cmd=='slice' or cmd=='preview' or cmd=='print':
       ms = [ ]
       n = 0
       for f in fsm:
-         m = trimesh.load(f)
+         m = loadMesh(f)
          mm = m.bounds
          sz = mm[1]-mm[0]
          if 'cols' in conf:
@@ -1166,7 +1363,10 @@ elif cmd == 'gconsole':
             if len(_)<255:
                break
          if len(s):
-            print(f"% {s}")   
+            sc = s
+            sc = re.sub('ok\n','\x01',s)
+            sc = re.sub('(\x01+)',lambda x: "ok\n" if len(x.group(1))<=1 else f"ok [{len(x.group(1))}x]\n",sc)
+            print(f"% {sc}")   
          if re.search('ok\n',s):
             break
          if time.time()-t > 10:
@@ -1181,9 +1381,21 @@ elif cmd == 'log':
    def disp(e):
       if 'filament_used' not in e:
          e['filament_used'] = 0
-      if conf['verbose']>0 or 'extended' in conf:
+      if conf['verbose']>0 or 'extended' in conf or 'output' in conf:
          if 'extended' in conf:
             print(json.dumps(e,indent=3))
+         elif 'output' in conf:
+            o = { }
+            for k in conf['output'].split(','):
+               if k in e:
+                  o[k] = e[k]
+               else:
+                  for s in 'conf slicing process args'.split(' '):
+                     if s in e and k in e[s]:
+                        o[k] = e[s][k]
+                     elif k==s and s in e:
+                        o[s] = e[s]
+            print(json.dumps(o))
          else:
             print(json.dumps(e))
       else:
@@ -1191,7 +1403,9 @@ elif cmd == 'log':
          ago = f"{int(ago/24)%24}d {ago%24:.0f}h ago"
          _ = ', '.join([os.path.basename(f) if re.search('\.\w+$',f) else f for f in e['files']])
          print(f"#{n}: {e['conf']['machine_name']} ({e['conf']['printer']}): {_} {ago}, {e['filament_used']/1000:.3f}m")
-   
+         xtr = f'{" ".join([f"--{k}="+e["conf"][k] for k in "scale,rotate".split(",") if k in e["conf"] ])}'
+         if len(xtr): print("   ",xtr)
+            
    if len(fs):
       iprint(f"querying {fs}")
 
