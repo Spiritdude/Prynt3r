@@ -1,0 +1,3 @@
+trimesh
+cython
+py-perl5
