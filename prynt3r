@@ -19,6 +19,7 @@
 #                                            slicer/<slicer>/map.ini
 #
 # History:
+# 2023/01/24: 0.0.9: fixing os.rename() -> shutil.move() for temporary files
 # 2023/01/13: 0.0.8: adding .3mj support as well, and webcam support again (like print3r), early -d rrf:<ip> RepRapFirmware support
 # 2023/01/09: 0.0.7: support for svg (via openscad) added
 # 2023/01/05: 0.0.6: experimental vdb import capability, more refined usage message
@@ -28,12 +29,12 @@
 # 2022/12/19: 0.0.1: cli args parsed, early .ini parsing without conditional variables, local and remote printer access works
 # 2022/12/17: start coding
 
-import sys, os, re, subprocess, json, time, datetime, serial, math, random, uuid, signal
+import sys, os, re, subprocess, json, time, datetime, serial, math, random, uuid, signal, shutil
 import trimesh
 import perl5
 
 APPNAME = "Prynt3r"
-VERSION = "0.0.8"
+VERSION = "0.0.9"
 APPREPO = f"https://github.com/Spiritdude/{APPNAME}"
 
 me = os.path.basename(sys.argv.pop(0))
@@ -409,7 +410,7 @@ def sliceMesh(f,fo,ms):
             with open(fo,"r") as fh2:
                fh.write(fh2.read())                   # -- FIXME: not sure if this is most efficient
             fh.close()
-            os.rename(fo2,fo)
+            shutil.move(fo2,fo)
          else:
             fh.close()
       
@@ -922,7 +923,7 @@ def webcamSnap(end=0):
                if 'rotate' in wcb:
                   tf = tmpfn('jpg')
                   subprocess.run(['convert',fno,'-rotate',str(wcb['rotate']),tf])
-                  os.rename(tf,fno)
+                  shutil.move(tf,fno)
             sys.exit(0)
          process['webcam']['snaps'].append(fno)
       process['webcam']['last'] = time.time()
