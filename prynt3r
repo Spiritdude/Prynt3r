@@ -538,7 +538,7 @@ def connectSerial(d):
 
    time.sleep(2)                          # -- allow older/slower 8-bit boards to get ready
 
-   if conf['machine_uuid'] != "":
+   if slicing['machine_uuid'] != "":
       uid = None
       for ask in ["M115","M122"]:
          writeSerial(ser,ask+"\n")
@@ -552,10 +552,10 @@ def connectSerial(d):
          elif preg_match('MAC address\s*(\S+)',_,m):
             uid = m[1]
             break
-      if conf['machine_uuid'] == uid:
-         iprint(f"authenticated \"{conf['machine_name']}\" ({conf['printer']}): {uid}")
+      if slicing['machine_uuid'] == uid:
+         iprint(f"authenticated \"{slicing['machine_name']}\" ({conf['printer']}): {uid}")
       else:
-         eprint(f"printer not authenticated '{uid}' != '{conf['machine_uuid']}' ({conf['machine_name']})",exit=1)
+         eprint(f"printer not authenticated '{uid}' != '{slicing['machine_uuid']}' ({slicing['machine_name']})",exit=1)
 
    return ser
             
@@ -644,15 +644,15 @@ def printGcode(f):
       import RepRapFirmwareAPI
       signal.signal(signal.SIGINT,abort_print)        # -- reassign SIGINT, so we can send optional abort-gcode
       rrf = RepRapFirmwareAPI.RRFRestAPI(m[1])
-      if conf['machine_uuid']!="":
+      if slicing['machine_uuid']!="":
          r = rrf.gcode("M122")
          for id in ['Board ID:\s*(\S+)','MAC address\s*(\S+)']:
             if preg_match(id,r,m):   
                uid = m[1]
-               if uid == conf['machine_uuid']:
-                  iprint(f"authenticated \"{conf['machine_name']}\" ({conf['printer']}): {uid}")
+               if uid == slicing['machine_uuid']:
+                  iprint(f"authenticated \"{slicing['machine_name']}\" ({slicing['printer']}): {uid}")
                else:
-                  eprint(f"printer not authenticated '{uid}' != '{conf['machine_uuid']}' ({conf['machine_name']})",exit=1)
+                  eprint(f"printer not authenticated '{uid}' != '{slicing['machine_uuid']}' ({slicing['machine_name']})",exit=1)
       rrf.upload(f,"/gcodes/current.gcode")           # -- uploading local file to current.gcode
       rrf.print("/gcodes/current.gcode")              # -- start printing right away
       conf['display_update'] = 0
