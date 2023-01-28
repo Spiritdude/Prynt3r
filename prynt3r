@@ -929,7 +929,7 @@ def webcamSnap(end=0):
       process['webcam']['last'] = time.time()
 
    if end:
-      time.sleep(2)                          # -- allow last webcam to be taken (we already waited 5s before)
+      time.sleep(2+wc['delay'])                          # -- allow last webcam to be taken
       stats = { "total": 0, "exists": 0 }
       for f in process['webcam']['snaps']:
          if os.path.exists(f):
@@ -1197,7 +1197,7 @@ if cmd=='slice' or cmd=='preview' or cmd=='print':
    
             # -- recenter X,Y and level Z 
             if conf['placement']!= 'none' and (('recenter' in conf and conf['recenter']) or ('relevel' in conf and conf['relevel'])):
-               tr = [(mm[0][j]-mm[1][j])/2 for j in range(3)]
+               tr = [-(mm[0][j]+mm[1][j])/2 for j in range(3)]
                pprint(f"reposition <{nstr(tr)}>")
                m.apply_translation(tr)
    
