@@ -1453,13 +1453,16 @@ elif cmd == 'log':
 
    if not (conf['verbose']>0 or 'extended' in conf):
       etot = sum([v for v in eabs.values()])
-      print(f"   {hits} entries, {etot/1000:.3f}m filament used")
+      print(f"   {hits} entries, {etot/1000:.3f}m filament used (~{etot/1000/330:.1f}kg)")
       if etot==0:
          etot = 1
       if len(eabs.keys())>1:
-         for k,v in eabs.items():
+         l = sorted(eabs.items(), key=lambda k: k[0])          # -- by key
+         # l = sorted(eabs.items(), key=lambda k: k[1])[::-1]    # -- by value, highest first
+         for kv in l:
+            k,v = kv
             if v>0:
-               print(f"      {k}: {tasks[k]:,} prints, {v/1000:.3f}m ({100/etot*v:.1f}%)")
+               print(f"      {k}: {tasks[k]:,} prints, {v/1000:.3f}m ~{v/1000/330:.1f}kg ({100/etot*v:.1f}%)")
    sys.exit(0)
    
 elif cmd == 'client':
