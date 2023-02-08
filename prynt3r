@@ -34,7 +34,7 @@ import trimesh
 import perl5
 
 APPNAME = "Prynt3r"
-VERSION = "0.0.9"
+VERSION = "0.1.0-beta1"
 APPREPO = f"https://github.com/Spiritdude/{APPNAME}"
 
 me = os.path.basename(sys.argv.pop(0))
@@ -650,7 +650,7 @@ def printGcode(f):
             if preg_match(id,r,m):   
                uid = m[1]
                if uid == slicing['machine_uuid']:
-                  iprint(f"authenticated \"{slicing['machine_name']}\" ({slicing['printer']}): {uid}")
+                  iprint(f"authenticated \"{slicing['machine_name']}\" ({conf['printer']}): {uid}")
                else:
                   eprint(f"printer not authenticated '{uid}' != '{slicing['machine_uuid']}' ({slicing['machine_name']})",exit=1)
       rrf.upload(f,"/gcodes/current.gcode")           # -- uploading local file to current.gcode
