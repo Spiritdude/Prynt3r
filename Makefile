@@ -1,5 +1,5 @@
 NAME=Prynt3r
-VERSION=0.1.0-beta1
+VERSION=0.1.0-beta2
 #DEST_BIN=~/bin/
 DEST_BIN=/usr/bin
 DEST_SHARE=/usr/share
