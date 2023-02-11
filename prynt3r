@@ -1138,7 +1138,6 @@ if cmd=='slice' or cmd=='preview' or cmd=='print':
          sz = mm[1]-mm[0]
          if 'placement' in conf and conf['placement']!='none':
             pos = [ 0, 0 ]    # -- cura's default to center of bed, hence pos is relative (not abs) to machine_width/depth center
-            pos = [ pos[i] - sz[i]/2 for i in range(2) ]   # -- center piece to center of bed
             if conf['placement']=='random':
                pos[0] += random.uniform(-1,1)*(slicing['machine_width']*.45-sz[0]/2)
                pos[1] += random.uniform(-1,1)*(slicing['machine_depth']*.45-sz[1]/2)
@@ -1301,7 +1300,10 @@ if cmd=='slice' or cmd=='preview' or cmd=='print':
          ms.append(m)
 
       m = trimesh.util.concatenate(ms)
-
+      mm = m.bounds
+      sz = mm[1]-mm[0]
+      m.apply_translate([-sz[0]/2, -sz[1]/2, 0])   # -- recenter by default
+      
       place_mesh(m)
       
       lprint(f"mesh {list(m.bounds[1]-m.bounds[0])}: {[list(v) for v in list(m.bounds)]}")
