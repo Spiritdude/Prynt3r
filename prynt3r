@@ -1461,47 +1461,6 @@ elif cmd == 'log':
                print(f"      {k}: {tasks[k]:,} prints, {v/1000:.3f}m ~{v/1000/330:.1f}kg ({100/etot*v:.1f}%)")
    sys.exit(0)
    
-elif cmd == 'assign':
-   def adb_fn():
-      return os.path.join(os.getenv("HOME"),f".prynt3r/db-{conf['printer']}.json")
-
-   def adb_spool(id,**argv):
-      return { 'id': id, 'weight': 1000, 'total_length': 330, 'brand': 'Unknown', 'material': 'PLA' } | argv
-
-   def adb_update(p,urn):
-      m = [ ]
-      db = { }
-      fndb = adb_fn()
-      if not os.path.exists(fndb):
-         fh = open(fndb,"x")
-         fh.write(json.dumps(db))
-         fh.close()
-      fh = open(fndb,"r")
-      db = json.load(fh)
-      fh.close()
-      if preg_match('^urn:([\w\-]+):(\S+)',urn,m) or preg_match('^([\w\-]+):([^:\s]+)',urn,m):
-         k,v = m[1],m[2]
-         if k == 'spool':
-            id = v
-            v = adb_spool(id)
-         else:
-            print(f"type <{k}> not yet supported, ignored")
-            return
-         if k not in db:
-            db[k] = { }
-         if id not in db[k]:
-            db[k][id] = v
-         fh = open(fndb+".new","w")
-         fh.write(json.dumps(db))
-         fh.close()
-         os.rename(fndb+".new",fndb)
-      else:
-         eprint(f"bad URN <{urn}>, not able to relate or process, use form urn:<kind>:<uid>, ignored")
-      
-   for urn in fs:
-      print(f"assign {urn} assigning to <{conf['printer']}>")
-      adb_update(conf['printer'],urn)
-
 elif cmd == 'client':
    if not os.path.exists(conf['device']):
       eprint(f"<{conf['device']}> doesn't exist",exit=1)
