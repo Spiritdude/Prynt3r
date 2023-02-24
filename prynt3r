@@ -34,7 +34,7 @@ import trimesh
 import perl5
 
 APPNAME = "Prynt3r"
-VERSION = "0.1.0-beta2"
+VERSION = "0.1.0-beta3"
 APPREPO = f"https://github.com/Spiritdude/{APPNAME}"
 
 me = os.path.basename(sys.argv.pop(0))
@@ -563,7 +563,7 @@ def printGcode(f):
    job = { }
    
    st = time.time()
-   stu = st
+   stu, stu2 = st, st
 
    job['start_time'] = st
    job['start_date'] = datetime.datetime.fromtimestamp(job['start_time']).isoformat()
@@ -618,7 +618,11 @@ def printGcode(f):
          em = 'rel'
 
    def update(fh):
-      nonlocal stu, n_ok, tool
+      nonlocal stu, stu2, n_ok, tool
+      if time.time()-stu2 > 5:
+         spool_updater()
+         stu2 = time.time()
+         
       if conf['verbose'] or conf['quiet'] or time.time()-stu < 1/5:
          return
       stu = time.time()
@@ -632,6 +636,33 @@ def printGcode(f):
       if conf['display_update']:
          writeSerial(ser,f"M117 {fcur/flen*100:.0f}% ETA {ftime(eta,short=1)} L{lyn} T{tool}\n")
          n_ok += 1
+
+   leabs = 0
+   
+   def spool_updater():
+      nonlocal leabs
+      
+      if 'spool_updater' not in conf:
+         return
+         
+      e_delta = eabs - leabs
+      leabs = eabs
+
+      def update_var(k): 
+         nonlocal e_delta
+         if k == 'spool':
+            if 'spool' in slicing:
+               return slicing[k]
+            if f'spool_{tool}' in slicing:
+               return slicing[f'spool_{tool}']
+         if k in slicing:
+            return slicing[k]
+         if k == 'e_delta':
+            return str(e_delta)
+
+      cmd = conf['spool_updater']
+      cmd = re.sub('\{([^}]+)\}',lambda x: update_var(x.group(1)),cmd)
+      execx(cmd.split(' '),nowait=True)
 
    m = [ ]
    if preg_match('rrf:(\S+)',conf['device'],m):          # -- RRF/RepRapFirmware: upload file, print & delete file again
@@ -763,7 +794,8 @@ def printGcode(f):
          print("")               # -- required to clear single line updates above with "\r"
 
    webcamSnap(end=1)          # -- let's take last webcam snapshot(s) of finished print
-
+   spool_updater()
+   
    # -- let's document the print
    job['time'] = job['end_time'] = time.time()
    job['end_date'] = datetime.datetime.fromtimestamp(job['end_time']).isoformat()
@@ -840,7 +872,10 @@ def convertToMesh(f,fo):
       
 def execx(a,**argv):
    lprint(f"exec {a}",level=2)
-   p = subprocess.run(a,capture_output=True)
+   if 'nowait' in argv and argv['nowait']:
+      p = subprocess.Popen(a,stdout=subprocess.PIPE, stderr=subprocess.PIPE, close_fds=True)
+   else:
+      p = subprocess.run(a,capture_output=True)
    if p.returncode:
       lprint(f"process {a[0]} returned non-zero: {p.returncode}",level=2)
       for l in p.stdout.decode().split("\n"):
@@ -849,7 +884,6 @@ def execx(a,**argv):
       for l in p.stderr.decode().split("\n"):
          if len(l):
             eprint(l)
-      
    return p.returncode
 
 def webcamSnap(end=0):
@@ -1302,7 +1336,7 @@ if cmd=='slice' or cmd=='preview' or cmd=='print':
       m = trimesh.util.concatenate(ms)
       mm = m.bounds
       sz = mm[1]-mm[0]
-      m.apply_translate([-sz[0]/2, -sz[1]/2, 0])   # -- recenter by default
+      m.apply_translation([-sz[0]/2, -sz[1]/2, 0])   # -- recenter by default
       
       place_mesh(m)
       
